@@ -8,10 +8,13 @@ import sys
 import time
 
 from CrashOut_Resources import (
+    ARCHETYPE_UNIQUE_LIMIT,
     BOT_NAME,
     DEFAULT_POWER_POINTS,
     DEFAULT_STARTING_HP,
     DECK_SIZE,
+    DECK_SIZE_MAX,
+    DECK_SIZE_MIN,
     FIFTH_CARD_HEAL,
     HP_MAX,
     HP_MIN,
@@ -24,6 +27,7 @@ from CrashOut_Resources import (
     ActiveBorrow,
     Card,
     Player,
+    allows_duplicate_archetypes,
     bot_choose_play,
     card_is_cooling,
     can_add_steal_card,
@@ -132,6 +136,7 @@ def create_card(
     existing: list[Card],
     *,
     allow_steal: bool = True,
+    deck_size: int = DECK_SIZE,
 ) -> Card:
     steals = False
     if allow_steal and can_add_steal_card(existing, power_points):
@@ -148,7 +153,7 @@ def create_card(
     budget = stat_budget(power_points, steals)
     while True:
         clear()
-        banner(f"Create Card {slot}/{DECK_SIZE}")
+        banner(f"Create Card {slot}/{deck_size}")
         if steals:
             print(
                 f"Spend {STEAL_PP_COST} PP on steal + {budget} PP on damage/heal "
@@ -163,7 +168,13 @@ def create_card(
             print(f"Spend exactly {power_points} power points.")
         print("Each point becomes either 1 damage or 1 heal.")
         print("Damage hits the target; heal always returns to YOU.")
-        print("You cannot have two cards of the same type in your deck.\n")
+        if allows_duplicate_archetypes(deck_size):
+            print(
+                f"Deck is above {ARCHETYPE_UNIQUE_LIMIT}: duplicate types allowed "
+                "(Steal / Heavy Hit still one each).\n"
+            )
+        else:
+            print("You cannot have two cards of the same type in your deck.\n")
         print("Types: Sanctuary / Caretaker / Allrounder / Bruiser / Wrecker")
         if existing:
             taken = ", ".join(sorted({c.name for c in existing}))
@@ -180,6 +191,7 @@ def create_card(
                 existing,
                 steals=steals,
                 heavy_hit=heavy_hit,
+                deck_size=deck_size,
             )
         except ValueError as exc:
             print(f"  -> {exc}")
@@ -197,11 +209,11 @@ def create_card(
         return card
 
 
-def create_fifth_card(existing: list[Card]) -> Card:
+def create_mercy_card(existing: list[Card], deck_size: int) -> Card:
     clear()
-    banner(f"Create Card {DECK_SIZE}/{DECK_SIZE}")
+    banner(f"Create Card {deck_size}/{deck_size}")
     print(f"Special heal card — always heals {FIFTH_CARD_HEAL} HP to the target.")
-    card = make_mercy_card(DECK_SIZE, existing)
+    card = make_mercy_card(deck_size, existing)
     print(f"\nAuto-named: {card.name}\n")
     print_card(card)
     print()
@@ -209,21 +221,25 @@ def create_fifth_card(existing: list[Card]) -> Card:
     return card
 
 
-def create_player_deck(player_num: int, total_players: int, power_points: int) -> list[Card]:
+def create_player_deck(
+    player_num: int, total_players: int, power_points: int, deck_size: int
+) -> list[Card]:
     clear()
     banner(f"Card Lab — player-{player_num}/{total_players}")
-    print(f"player-{player_num}, build your deck of 5 cards.")
-    print(f"Cards 1–4: {power_points} power points each.")
-    print(f"Card 5: Mercy ({FIFTH_CARD_HEAL} heal, any target).")
+    print(f"player-{player_num}, build your deck of {deck_size} cards.")
+    print(f"Cards 1–{deck_size - 1}: {power_points} power points each.")
+    print(f"Card {deck_size}: Mercy ({FIFTH_CARD_HEAL} heal, any target).")
     print("After everyone crafts, craftable cards are shuffled and re-dealt.")
     print("Mercy and steal cards always stay with the player who made them.")
     print("Heavy Hit cards also stay with their owner.\n")
     pause()
 
     deck: list[Card] = []
-    for slot in range(1, DECK_SIZE):
-        deck.append(create_card(slot, slot, power_points, deck))
-    deck.append(create_fifth_card(deck))
+    for slot in range(1, deck_size):
+        deck.append(
+            create_card(slot, slot, power_points, deck, deck_size=deck_size)
+        )
+    deck.append(create_mercy_card(deck, deck_size))
 
     clear()
     banner(f"player-{player_num} Deck Ready")
@@ -234,18 +250,20 @@ def create_player_deck(player_num: int, total_players: int, power_points: int) -
     return deck
 
 
-def create_all_player_decks(player_count: int, power_points: int) -> list[list[Card]]:
+def create_all_player_decks(
+    player_count: int, power_points: int, deck_size: int
+) -> list[list[Card]]:
     clear()
     banner("Card Lab")
-    print(f"Each of the {player_count} players builds a deck of {DECK_SIZE} cards.")
-    print(f"Cards 1–4: {power_points} power points each.")
-    print(f"Card 5: Mercy ({FIFTH_CARD_HEAL} heal, any target).")
+    print(f"Each of the {player_count} players builds a deck of {deck_size} cards.")
+    print(f"Cards 1–{deck_size - 1}: {power_points} power points each.")
+    print(f"Card {deck_size}: Mercy ({FIFTH_CARD_HEAL} heal, any target).")
     print("\nWhen everyone is done, craftable cards are combined, shuffled, and dealt.")
     print("Mercy, steal, and Heavy Hit cards stay with whoever crafted them.\n")
     pause()
 
     return [
-        create_player_deck(n, player_count, power_points)
+        create_player_deck(n, player_count, power_points, deck_size)
         for n in range(1, player_count + 1)
     ]
 
@@ -262,29 +280,35 @@ def show_deal_summary(players: list[Player]) -> None:
     pause()
 
 
-def create_shared_deck(power_points: int, for_solo: bool = False) -> list[Card]:
+def create_shared_deck(
+    power_points: int, deck_size: int, for_solo: bool = False
+) -> list[Card]:
     clear()
     banner("Card Lab")
     if for_solo:
-        print("Build YOUR deck of 5 cards. The bot uses a fixed deck.")
+        print(f"Build YOUR deck of {deck_size} cards. The bot uses a matching deck size.")
     else:
-        print(f"Create a shared deck of {DECK_SIZE} cards.")
-    print(f"Cards 1–4: {power_points} power points each.")
-    print(f"Card 5: Mercy ({FIFTH_CARD_HEAL} heal, any target).")
+        print(f"Create a shared deck of {deck_size} cards.")
+    print(f"Cards 1–{deck_size - 1}: {power_points} power points each.")
+    print(f"Card {deck_size}: Mercy ({FIFTH_CARD_HEAL} heal, any target).")
     if for_solo:
-        print(
-            f"\nBot deck: Caretaker, Bruiser, Wrecker, Sanctuary, Mercy "
-            f"({power_points} PP)."
-        )
+        print(f"\nBot deck: {deck_size} cards ({power_points} PP).")
     print()
     pause()
 
     deck: list[Card] = []
-    for slot in range(1, DECK_SIZE):
+    for slot in range(1, deck_size):
         deck.append(
-            create_card(slot, slot, power_points, deck, allow_steal=not for_solo)
+            create_card(
+                slot,
+                slot,
+                power_points,
+                deck,
+                allow_steal=not for_solo,
+                deck_size=deck_size,
+            )
         )
-    deck.append(create_fifth_card(deck))
+    deck.append(create_mercy_card(deck, deck_size))
 
     clear()
     banner("Your Deck Ready" if for_solo else "Shared Deck Ready")
@@ -312,12 +336,22 @@ def choose_match_settings() -> MatchSettings:
         "Power points per card", PP_MIN, PP_MAX, DEFAULT_POWER_POINTS
     )
     print()
+    deck_size = prompt_int(
+        "Max cards per deck", DECK_SIZE_MIN, DECK_SIZE_MAX, DECK_SIZE
+    )
+    print()
     print(
         f"  {'1 player vs bot' if player_count == 1 else f'{player_count} players'} | "
-        f"{starting_hp} HP (max {starting_hp * 2}) | {power_points} PP"
+        f"{starting_hp} HP (max {starting_hp * 2}) | {power_points} PP | "
+        f"{deck_size} cards"
     )
+    if allows_duplicate_archetypes(deck_size):
+        print(
+            f"  Duplicate types allowed (deck above {ARCHETYPE_UNIQUE_LIMIT}); "
+            "Steal / Heavy Hit still one each."
+        )
     pause()
-    return MatchSettings(player_count, starting_hp, power_points)
+    return MatchSettings(player_count, starting_hp, power_points, deck_size)
 
 
 def pass_device(next_player: Player) -> None:
@@ -503,17 +537,23 @@ def main() -> None:
         banner("Welcome")
         print("Terminal mode — hotseat or 1 player vs bot.")
         print("Attack: damage target + heal you. Self: heal only.")
-        print(f"Max HP = 2x starting. Card 5 = Mercy ({FIFTH_CARD_HEAL}).")
-        print(f"Bot ({BOT_NAME}): Caretaker, Bruiser, Wrecker, Sanctuary, Mercy.\n")
+        print(
+            f"Max HP = 2x starting. Last card = Mercy ({FIFTH_CARD_HEAL}). "
+            f"Deck size {DECK_SIZE_MIN}-{DECK_SIZE_MAX}."
+        )
+        print(
+            f"Above {ARCHETYPE_UNIQUE_LIMIT} cards: duplicate types allowed "
+            "(Steal / Heavy Hit still one each).\n"
+        )
         pause()
 
         settings = choose_match_settings()
 
         if settings.vs_bot:
             human_deck = create_shared_deck(
-                settings.power_points, for_solo=True
+                settings.power_points, settings.deck_size, for_solo=True
             )
-            bot_deck = make_bot_deck(settings.power_points)
+            bot_deck = make_bot_deck(settings.power_points, settings.deck_size)
             players = make_solo_players(
                 human_deck, bot_deck, settings.starting_hp
             )
@@ -525,7 +565,7 @@ def main() -> None:
             pause()
         else:
             player_decks = create_all_player_decks(
-                settings.player_count, settings.power_points
+                settings.player_count, settings.power_points, settings.deck_size
             )
             players = make_players_from_mixed_decks(
                 player_decks, settings.starting_hp

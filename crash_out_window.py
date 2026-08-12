@@ -15,10 +15,13 @@ except ImportError:
     HAS_PIL = False
 
 from CrashOut_Resources import (
+    ARCHETYPE_UNIQUE_LIMIT,
     BOT_NAME,
     DEFAULT_POWER_POINTS,
     DEFAULT_STARTING_HP,
     DECK_SIZE,
+    DECK_SIZE_MAX,
+    DECK_SIZE_MIN,
     FIFTH_CARD_HEAL,
     HP_MAX,
     HP_MIN,
@@ -30,6 +33,7 @@ from CrashOut_Resources import (
     ActiveBorrow,
     Card,
     Player,
+    allows_duplicate_archetypes,
     archetype_taken,
     bot_choose_play,
     can_add_heavy_hit_card,
@@ -37,6 +41,7 @@ from CrashOut_Resources import (
     can_craft_steal,
     card_is_cooling,
     check_winner,
+    clamp_deck_size,
     craft_card,
     deck_has_heavy_hit,
     deck_has_steal,
@@ -59,6 +64,7 @@ from crash_out_themes import (
     randomize_theme,
     reset_theme,
 )
+from crash_out_pixel_bg import generate_theme_wallpaper
 
 # Playing-card style buttons: width:height = 5:7
 CARD_ASPECT = 7 / 5
@@ -67,7 +73,7 @@ CARD_MAX_W = 200
 CARD_GAP_MIN = 6
 TARGET_MIN = 100
 TARGET_MAX = 200
-LOG_PANEL_WIDTH = 300
+LOG_CLOSE_SIZE = 40
 PREVIEW_CARD_W = 168
 DECK_MINI_W = 110
 BOT_ICON_PATH = Path(__file__).resolve().parent / "assets" / "bot_icon.png"
@@ -645,6 +651,71 @@ ART_BTN_W = 200
 ART_BTN_H = 52
 
 
+class PixelCloseButton(tk.Canvas):
+    """Small pixel-art X button for closing overlays."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        *,
+        command=None,
+        size: int = LOG_CLOSE_SIZE,
+        bg: str | None = None,
+    ) -> None:
+        super().__init__(
+            parent,
+            width=size,
+            height=size,
+            bg=bg if bg is not None else _theme().log_bg,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.command = command
+        self._hover = False
+        self._size = size
+        self._draw()
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+
+    def _draw(self, hover: bool = False) -> None:
+        self.delete("all")
+        art = _theme().cards
+        fill, accent, _text = art.heavy_hit
+        if hover:
+            fill = _shift_hex(fill, 28)
+            accent = _shift_hex(accent, 20)
+        s = max(2, self._size // 14)
+        pad = s
+        _draw_card_frame(self, pad, pad, self._size - pad, self._size - pad, fill, accent, s)
+        # Pixel X made of thick diagonal bars
+        m = self._size // 2
+        arm = self._size // 2 - 3 * s
+        thickness = max(2, s + 1)
+        for dx in range(-thickness // 2, thickness // 2 + 1):
+            self.create_line(
+                m - arm + dx, m - arm, m + arm + dx, m + arm,
+                fill=accent, width=s,
+            )
+            self.create_line(
+                m + arm + dx, m - arm, m - arm + dx, m + arm,
+                fill=accent, width=s,
+            )
+
+    def _on_click(self, _event=None) -> None:
+        if self.command:
+            self.command()
+
+    def _on_enter(self, _event=None) -> None:
+        self._hover = True
+        self._draw(hover=True)
+
+    def _on_leave(self, _event=None) -> None:
+        self._hover = False
+        self._draw(hover=False)
+
+
 class ThemedArtButton(tk.Canvas):
     """Action button drawn with the active theme's card-frame art."""
 
@@ -813,6 +884,9 @@ class CrashOutApp(tk.Tk):
         self._hand_outer: tk.Frame | None = None
         self._overlay_host = tk.Frame(self, bg=_theme().screen_bg)
         self._target_overlay: tk.Canvas | None = None
+        self._log_overlay: tk.Canvas | None = None
+        self._log_panel: tk.Misc | None = None
+        self._log_inner_id: int | None = None
         self._craft_scale: ttk.Scale | None = None
         self._target_row: tk.Frame | None = None
         self._target_buttons: list[RoundedTargetButton] = []
@@ -821,6 +895,14 @@ class CrashOutApp(tk.Tk):
         self.preview_status: ttk.Label | None = None
         self.save_btn: ttk.Button | None = None
         self._theme_label: ttk.Label | None = None
+        self._bg_photo: tk.PhotoImage | None = None
+        self._root_bg_photo: tk.PhotoImage | None = None
+        self._bg_tint: str | None = None
+        self._ui_fill = False
+        self._last_root_size = (0, 0)
+        self._last_container_size = (0, 0)
+        self._bg_resize_job: str | None = None
+        self.bind("<Escape>", self._on_escape_overlay)
 
         self.style = ttk.Style(self)
         try:
@@ -829,8 +911,15 @@ class CrashOutApp(tk.Tk):
             pass
         self._apply_theme_styles()
 
-        self.container = tk.Frame(self, bg=_theme().screen_bg)
+        self._root_bg = tk.Label(self, bd=0, highlightthickness=0)
+        self._root_bg.place(x=0, y=0, relwidth=1, relheight=1)
+        self.container = tk.Canvas(self, highlightthickness=0, bd=0, bg=_theme().screen_bg)
         self.container.pack(fill="both", expand=True, padx=16, pady=16)
+        self._ui = tk.Frame(self.container, bg=_theme().screen_bg)
+        self._ui_win = self.container.create_window(0, 0, anchor="nw", window=self._ui)
+        self.container.bind("<Configure>", self._on_container_configure)
+        self.bind("<Configure>", self._on_root_configure)
+        self._refresh_wallpapers()
         self.show_setup()
 
     def _apply_theme_styles(self) -> None:
@@ -838,8 +927,12 @@ class CrashOutApp(tk.Tk):
         self.configure(bg=theme.screen_bg)
         if hasattr(self, "container"):
             self.container.configure(bg=theme.screen_bg)
+        if hasattr(self, "_ui"):
+            self._ui.configure(bg=theme.screen_bg)
         if hasattr(self, "_overlay_host"):
             self._overlay_host.configure(bg=theme.screen_bg)
+        if hasattr(self, "_root_bg"):
+            self._refresh_wallpapers()
         self.style.configure(
             "Title.TLabel",
             font=(_font_family(), 22, "bold"),
@@ -955,24 +1048,183 @@ class CrashOutApp(tk.Tk):
 
     def _raise_overlay_layer(self) -> None:
         self._overlay_host.place(relx=0, rely=0, relwidth=1, relheight=1)
-        self.container.lower(self._overlay_host)
+        try:
+            self.container.lower(self._overlay_host)
+        except tk.TclError:
+            pass
         tk.Misc.tkraise(self._overlay_host)
 
     def _set_screen_bg(self, color: str) -> None:
+        self._bg_tint = color
         self.configure(bg=color)
-        self.container.configure(bg=color)
-        self._overlay_host.configure(bg=color)
+        if hasattr(self, "container"):
+            self.container.configure(bg=color)
+        if hasattr(self, "_ui"):
+            self._ui.configure(bg=color)
+        if hasattr(self, "_overlay_host"):
+            self._overlay_host.configure(bg=color)
+        self._refresh_wallpapers(tint=color)
+
+    def _on_root_configure(self, event: tk.Event) -> None:
+        if event.widget is not self:
+            return
+        if event.width < 40 or event.height < 40:
+            return
+        size = (event.width, event.height)
+        if size == self._last_root_size:
+            return
+        self._last_root_size = size
+        self._refresh_root_wallpaper(event.width, event.height)
+
+    def _on_container_configure(self, event: tk.Event) -> None:
+        if event.widget is not self.container:
+            return
+        if event.width < 40 or event.height < 40:
+            return
+        size = (event.width, event.height)
+        if size == self._last_container_size:
+            self._layout_ui_window(event.width, event.height)
+            return
+        self._last_container_size = size
+        if self._bg_resize_job is not None:
+            try:
+                self.after_cancel(self._bg_resize_job)
+            except tk.TclError:
+                pass
+        self._bg_resize_job = self.after(
+            40, lambda w=event.width, h=event.height: self._finish_container_resize(w, h)
+        )
+
+    def _finish_container_resize(self, width: int, height: int) -> None:
+        self._bg_resize_job = None
+        self._refresh_container_wallpaper(width, height)
+        self._layout_ui_window(width, height)
+
+    def _refresh_wallpapers(self, tint: str | None = None) -> None:
+        if tint is not None:
+            self._bg_tint = tint
+        self.update_idletasks()
+        rw = max(self.winfo_width(), 200)
+        rh = max(self.winfo_height(), 200)
+        self._refresh_root_wallpaper(rw, rh)
+        if hasattr(self, "container"):
+            cw = max(self.container.winfo_width(), 200)
+            ch = max(self.container.winfo_height(), 200)
+            self._refresh_container_wallpaper(cw, ch)
+            self._layout_ui_window(cw, ch)
+
+    def _refresh_root_wallpaper(self, width: int, height: int) -> None:
+        if not hasattr(self, "_root_bg"):
+            return
+        theme = _theme()
+        tint = self._bg_tint or theme.screen_bg
+        photo = generate_theme_wallpaper(theme, width, height, tint=tint)
+        self._root_bg_photo = photo
+        self._root_bg.configure(image=photo, bg=tint)
+        self._root_bg.lower()
+
+    def _refresh_container_wallpaper(self, width: int, height: int) -> None:
+        theme = _theme()
+        tint = self._bg_tint or theme.screen_bg
+        photo = generate_theme_wallpaper(theme, width, height, tint=tint)
+        self._bg_photo = photo
+        self.container.delete("wallpaper")
+        self.container.create_image(
+            0, 0, anchor="nw", image=photo, tags="wallpaper"
+        )
+        self.container.tag_lower("wallpaper")
+        self.container.configure(bg=tint)
+
+    def _layout_ui_window(self, width: int, height: int) -> None:
+        if not hasattr(self, "_ui_win"):
+            return
+        if self._ui_fill:
+            pad = 22
+            self.container.coords(self._ui_win, pad, pad)
+            self.container.itemconfigure(
+                self._ui_win,
+                anchor="nw",
+                width=max(40, width - 2 * pad),
+                height=max(40, height - 2 * pad),
+            )
+        else:
+            self._ui.update_idletasks()
+            rw = max(self._ui.winfo_reqwidth(), 80)
+            rh = max(self._ui.winfo_reqheight(), 80)
+            self.container.coords(self._ui_win, width // 2, height // 2)
+            self.container.itemconfigure(
+                self._ui_win,
+                anchor="center",
+                width=rw,
+                height=rh,
+            )
+        self.container.tag_raise(self._ui_win)
 
     def clear(self) -> None:
+        self._hide_log_overlay()
         self._hide_target_overlay()
         self._card_faces = []
         self._hand_outer = None
         self.preview = None
         self.preview_status = None
         self.save_btn = None
+        self._ui_fill = False
         self._set_screen_bg(_theme().screen_bg)
-        for w in self.container.winfo_children():
+        for w in self._ui.winfo_children():
             w.destroy()
+
+    def _relayout_ui(self) -> None:
+        if not hasattr(self, "container"):
+            return
+        cw = max(self.container.winfo_width(), 200)
+        ch = max(self.container.winfo_height(), 200)
+        self._layout_ui_window(cw, ch)
+
+    def _install_widget_wallpaper(self, widget: tk.Misc, tint: str | None = None) -> None:
+        """Place a theme-tinted pixel wallpaper behind a widget's children."""
+        theme = _theme()
+        color = tint or self._bg_tint or theme.screen_bg
+
+        def _paint(_event: tk.Event | None = None) -> None:
+            w = max(widget.winfo_width(), 64)
+            h = max(widget.winfo_height(), 64)
+            if w < 64 or h < 64:
+                return
+            photo = generate_theme_wallpaper(theme, w, h, tint=color)
+            # Keep a per-widget reference so PhotoImage is not GC'd.
+            photos = getattr(self, "_widget_bg_photos", {})
+            photos[id(widget)] = photo
+            self._widget_bg_photos = photos
+            existing = getattr(widget, "_pixel_bg_label", None)
+            if existing is not None:
+                try:
+                    existing.configure(image=photo, bg=color)
+                    existing.place(x=0, y=0, relwidth=1, relheight=1)
+                    existing.lower()
+                    return
+                except tk.TclError:
+                    pass
+            label = tk.Label(widget, image=photo, bd=0, highlightthickness=0, bg=color)
+            label.place(x=0, y=0, relwidth=1, relheight=1)
+            label.lower()
+            widget._pixel_bg_label = label  # type: ignore[attr-defined]
+
+        widget.bind("<Configure>", _paint, add="+")
+        self.after_idle(_paint)
+
+    def _release_overlay_host(self) -> None:
+        if self._target_overlay is None and self._log_overlay is None:
+            self._overlay_host.place_forget()
+
+    def _on_escape_overlay(self, _event: tk.Event | None = None) -> str:
+        if self._log_overlay is not None:
+            self._hide_log_overlay()
+            return "break"
+        if self._target_overlay is not None:
+            self._hide_target_overlay()
+            self.pending_card = None
+            return "break"
+        return "break"
 
     def _get_bot_photo(self, size: int) -> tk.PhotoImage | None:
         if not BOT_ICON_PATH.exists():
@@ -1013,12 +1265,131 @@ class CrashOutApp(tk.Tk):
         )
 
     def _hide_target_overlay(self) -> None:
-        if self._target_overlay is not None:
-            self._target_overlay.destroy()
+        for child in list(self._overlay_host.winfo_children()):
+            if child is self._log_overlay or child is self._log_panel:
+                continue
+            child.destroy()
         self._target_overlay = None
         self._target_row = None
         self._target_buttons = []
-        self._overlay_host.place_forget()
+        self._release_overlay_host()
+
+    def _draw_log_dim(self, _event: tk.Event | None = None) -> None:
+        """Unused for fullscreen log; kept for resize hook compatibility."""
+        return
+
+    def _layout_log_panel(self, _event: tk.Event | None = None) -> None:
+        if self._log_panel is None:
+            return
+        try:
+            w = self._log_panel.winfo_width()
+            h = self._log_panel.winfo_height()
+        except tk.TclError:
+            return
+        if w < 40 or h < 40:
+            return
+        theme = _theme()
+        fill, accent, _text = theme.cards.normal
+        scale = max(2, min(w, h) // 80)
+        self._log_panel.delete("frame")
+        # Draw frame under content via temporary tag, then lower
+        # Use a helper canvas layer: redraw by creating tagged shapes
+        items_before = set(self._log_panel.find_all())
+        _draw_card_frame(self._log_panel, scale, scale, w - scale, h - scale, fill, accent, scale)
+        for item in self._log_panel.find_all():
+            if item not in items_before:
+                self._log_panel.itemconfigure(item, tags=("frame",))
+        self._log_panel.tag_lower("frame")
+        if self._log_inner_id is not None:
+            inset = 6 * scale
+            self._log_panel.coords(self._log_inner_id, w // 2, h // 2)
+            self._log_panel.itemconfigure(
+                self._log_inner_id,
+                width=max(40, w - 2 * inset),
+                height=max(40, h - 2 * inset),
+            )
+
+    def _hide_log_overlay(self) -> None:
+        shells = []
+        for w in (self._log_panel, self._log_overlay):
+            if w is not None and w not in shells:
+                shells.append(w)
+        for w in shells:
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+        self._log_panel = None
+        self._log_overlay = None
+        self._log_inner_id = None
+        self.log = None
+        self._release_overlay_host()
+
+    def _show_log_overlay(self) -> None:
+        self._hide_target_overlay()
+        self._hide_log_overlay()
+        self._raise_overlay_layer()
+        theme = _theme()
+        fill, accent, _text_color = theme.cards.normal
+
+        # Fullscreen shell — no separate dim layer
+        shell = tk.Canvas(
+            self._overlay_host,
+            highlightthickness=0,
+            bd=0,
+            bg=theme.log_bg,
+        )
+        shell.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self._log_overlay = shell
+        self._log_panel = shell
+
+        inner = tk.Frame(shell, bg=theme.log_bg)
+        self._log_inner_id = shell.create_window(0, 0, window=inner, anchor="center")
+
+        header = tk.Frame(inner, bg=theme.log_bg)
+        header.pack(fill="x", padx=16, pady=(14, 8))
+        tk.Label(
+            header,
+            text="GAME LOG",
+            fg=accent,
+            bg=theme.log_bg,
+            font=(_font_family(), 20, "bold"),
+        ).pack(side="left")
+        PixelCloseButton(
+            header,
+            command=self._hide_log_overlay,
+            size=LOG_CLOSE_SIZE,
+            bg=theme.log_bg,
+        ).pack(side="right")
+
+        log_frame = tk.Frame(inner, bg=theme.log_bg)
+        log_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
+
+        scrollbar = tk.Scrollbar(
+            log_frame, bg=theme.scale_trough, troughcolor=theme.log_bg
+        )
+        scrollbar.pack(side="right", fill="y")
+
+        self.log = tk.Text(
+            log_frame,
+            bg=theme.log_bg,
+            fg=theme.log_fg,
+            insertbackground=theme.log_fg,
+            font=(_font_family(), 12),
+            relief="flat",
+            wrap="word",
+            state="disabled",
+            yscrollcommand=scrollbar.set,
+            padx=12,
+            pady=12,
+        )
+        self.log.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.log.yview)
+        self._render_game_log()
+
+        shell.bind("<Configure>", self._layout_log_panel)
+        self.after_idle(self._layout_log_panel)
+        self._raise_overlay_layer()
 
     def _target_subtitle(self, card: Card, target_idx: int) -> str:
         if card.heal_any:
@@ -1044,6 +1415,7 @@ class CrashOutApp(tk.Tk):
             btn.place(x=start_x + i * (size + gap), y=y, width=size, height=size)
 
     def _show_target_overlay(self, card: Card) -> None:
+        self._hide_log_overlay()
         self._hide_target_overlay()
         self._raise_overlay_layer()
         self._target_overlay = tk.Canvas(
@@ -1132,8 +1504,9 @@ class CrashOutApp(tk.Tk):
         self._screen = "setup"
         self.clear()
         theme = _theme()
-        center = tk.Frame(self.container, bg=theme.screen_bg)
+        center = tk.Frame(self._ui, bg=theme.screen_bg)
         center.pack(expand=True)
+        self._install_widget_wallpaper(center, theme.screen_bg)
 
         ttk.Label(center, text="CRASH OUT", style="SetupTitle.TLabel").pack()
         ttk.Label(
@@ -1196,12 +1569,43 @@ class CrashOutApp(tk.Tk):
             style="Setup.TEntry",
         ).grid(row=2, column=1, sticky="w", padx=8)
 
-        ttk.Label(
+        self.deck_size_var = tk.IntVar(value=DECK_SIZE)
+        ttk.Label(form, text="Max cards / deck", style="SetupBody.TLabel").grid(
+            row=3, column=0, sticky="e", pady=8, padx=8
+        )
+        deck_row = tk.Frame(form, bg=theme.screen_bg)
+        deck_row.grid(row=3, column=1, sticky="w", padx=8)
+        ttk.Button(
+            deck_row,
+            text="-",
+            style="Setup.TButton",
+            width=3,
+            command=self._deck_size_down,
+        ).pack(side="left")
+        self._deck_size_label = ttk.Label(
+            deck_row,
+            textvariable=self.deck_size_var,
+            style="SetupBody.TLabel",
+            width=4,
+            anchor="center",
+        )
+        self._deck_size_label.pack(side="left", padx=8)
+        ttk.Button(
+            deck_row,
+            text="+",
+            style="Setup.TButton",
+            width=3,
+            command=self._deck_size_up,
+        ).pack(side="left")
+
+        self._setup_rules_label = ttk.Label(
             center,
-            text=f"Max HP = 2x starting. Card 5 = Mercy ({FIFTH_CARD_HEAL} heal any target).",
+            text=self._setup_rules_text(DECK_SIZE),
             style="SetupBody.TLabel",
             justify="center",
-        ).pack(pady=(24, 12))
+            wraplength=720,
+        )
+        self._setup_rules_label.pack(pady=(24, 12))
 
         ttk.Button(
             center,
@@ -1230,13 +1634,58 @@ class CrashOutApp(tk.Tk):
             style="SetupBody.TLabel",
         )
         self._theme_label.pack(pady=(8, 0))
+        self.after_idle(self._relayout_ui)
+
+    def _setup_rules_text(self, deck_size: int) -> str:
+        last = deck_size
+        lines = [
+            f"Max HP = 2x starting. Last card ({last}) = Mercy "
+            f"({FIFTH_CARD_HEAL} heal any target).",
+            f"Deck size {DECK_SIZE_MIN}-{DECK_SIZE_MAX}.",
+        ]
+        if allows_duplicate_archetypes(deck_size):
+            lines.append(
+                f"Above {ARCHETYPE_UNIQUE_LIMIT} cards: duplicate types allowed "
+                "(Steal / Heavy Hit still one each)."
+            )
+        else:
+            lines.append(
+                f"At {ARCHETYPE_UNIQUE_LIMIT} or fewer cards: each type is unique "
+                f"(duplicates unlock above {ARCHETYPE_UNIQUE_LIMIT})."
+            )
+        return "\n".join(lines)
+
+    def _refresh_setup_rules(self) -> None:
+        if getattr(self, "_setup_rules_label", None) is None:
+            return
+        try:
+            if not self._setup_rules_label.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        self._setup_rules_label.configure(
+            text=self._setup_rules_text(int(self.deck_size_var.get()))
+        )
+
+    def _deck_size_up(self) -> None:
+        value = clamp_deck_size(int(self.deck_size_var.get()) + 1)
+        self.deck_size_var.set(value)
+        self._refresh_setup_rules()
+
+    def _deck_size_down(self) -> None:
+        value = clamp_deck_size(int(self.deck_size_var.get()) - 1)
+        self.deck_size_var.set(value)
+        self._refresh_setup_rules()
 
     def begin_card_lab(self) -> None:
         try:
             hp = int(self.hp_var.get().strip())
             pp = int(self.pp_var.get().strip())
+            deck_size = int(self.deck_size_var.get())
         except ValueError:
-            messagebox.showerror("Invalid input", "HP and power points must be numbers.")
+            messagebox.showerror(
+                "Invalid input", "HP, power points, and max cards must be numbers."
+            )
             return
         if not (HP_MIN <= hp <= HP_MAX):
             messagebox.showerror("Invalid HP", f"Starting HP must be {HP_MIN}-{HP_MAX}.")
@@ -1246,10 +1695,16 @@ class CrashOutApp(tk.Tk):
                 "Invalid PP", f"Power points must be {PP_MIN}-{PP_MAX}."
             )
             return
+        if not (DECK_SIZE_MIN <= deck_size <= DECK_SIZE_MAX):
+            messagebox.showerror(
+                "Invalid deck size",
+                f"Max cards must be {DECK_SIZE_MIN}-{DECK_SIZE_MAX}.",
+            )
+            return
 
         mode = self.mode_var.get()
         count = int(mode[0])
-        self.settings = MatchSettings(count, hp, pp)
+        self.settings = MatchSettings(count, hp, pp, deck_size)
         self.starting_hp = hp
         self.crafted = []
         self.all_player_decks = []
@@ -1261,8 +1716,9 @@ class CrashOutApp(tk.Tk):
         self._screen = "craft"
         assert self.settings is not None
         self.clear()
-        if self.craft_slot >= DECK_SIZE:
-            self.crafted.append(make_mercy_card(DECK_SIZE, self.crafted))
+        deck_size = self.settings.deck_size
+        if self.craft_slot >= deck_size:
+            self.crafted.append(make_mercy_card(deck_size, self.crafted))
             if self.settings.vs_bot:
                 self.start_match()
             else:
@@ -1271,22 +1727,23 @@ class CrashOutApp(tk.Tk):
 
         pp = self.settings.power_points
         if self.settings.vs_bot:
-            lab_title = f"Card Lab — Card {self.craft_slot}/{DECK_SIZE}"
+            lab_title = f"Card Lab — Card {self.craft_slot}/{deck_size}"
             lab_hint = (
                 f"Spend exactly {pp} power points (damage + heal)."
             )
         else:
             lab_title = (
                 f"Card Lab — player-{self.crafting_player} "
-                f"— Card {self.craft_slot}/{DECK_SIZE}"
+                f"— Card {self.craft_slot}/{deck_size}"
             )
             lab_hint = (
                 f"player-{self.crafting_player}, spend exactly {pp} power points "
                 f"(damage + heal). Craftable cards are shuffled and re-dealt when "
                 f"everyone is done. Mercy and steal stay with their owner."
             )
-        lab = tk.Frame(self.container, bg=_theme().screen_bg)
+        lab = tk.Frame(self._ui, bg=_theme().screen_bg)
         lab.pack(expand=True)
+        self._install_widget_wallpaper(lab, _theme().screen_bg)
         ttk.Label(
             lab,
             text=lab_title,
@@ -1311,12 +1768,15 @@ class CrashOutApp(tk.Tk):
                 else ""
             )
         )
+        type_hint = (
+            f"Duplicate types allowed (deck above {ARCHETYPE_UNIQUE_LIMIT}); "
+            "Steal / Heavy Hit still one each."
+            if self.settings.allow_duplicate_archetypes
+            else "No duplicate types (Sanctuary / Caretaker / Allrounder / Bruiser / Wrecker)."
+        )
         ttk.Label(
             lab,
-            text=(
-                f"{lab_hint}{steal_hint} "
-                "No duplicate types (Sanctuary / Caretaker / Allrounder / Bruiser / Wrecker)."
-            ),
+            text=f"{lab_hint}{steal_hint} {type_hint}",
             style="SetupBody.TLabel",
             wraplength=800,
             justify="center",
@@ -1409,6 +1869,7 @@ class CrashOutApp(tk.Tk):
             for c in self.crafted:
                 face = RoundedCardButton(deck_row, c, width=DECK_MINI_W)
                 face.pack(side="left", padx=6, pady=4)
+        self.after_idle(self._relayout_ui)
 
     def _craft_budget(self) -> int:
         assert self.settings is not None
@@ -1462,14 +1923,28 @@ class CrashOutApp(tk.Tk):
             heavy_hit=heavy_hit,
         )
         taken = archetype_taken(name, self.crafted)
-        self.preview.set_card(card, disabled=taken)
-        if taken:
-            self.preview_status.configure(
-                text="Already in deck — pick another split."
-            )
+        block_dupe = taken and not self.settings.allow_duplicate_archetypes
+        if heavy_hit and deck_has_heavy_hit(self.crafted):
+            block_dupe = True
+        if steals and deck_has_steal(self.crafted):
+            block_dupe = True
+        self.preview.set_card(card, disabled=block_dupe)
+        if block_dupe:
+            if heavy_hit and deck_has_heavy_hit(self.crafted):
+                msg = "Heavy Hit already in deck (attribute — one only)."
+            elif steals and deck_has_steal(self.crafted):
+                msg = "Steal already in deck (attribute — one only)."
+            else:
+                msg = "Already in deck — pick another split."
+            self.preview_status.configure(text=msg)
             self.save_btn.state(["disabled"])
         else:
-            self.preview_status.configure(text="")
+            if taken and self.settings.allow_duplicate_archetypes:
+                self.preview_status.configure(
+                    text="Duplicate type allowed (deck above 7)."
+                )
+            else:
+                self.preview_status.configure(text="")
             self.save_btn.state(["!disabled"])
 
     def save_crafted_card(self) -> None:
@@ -1485,6 +1960,7 @@ class CrashOutApp(tk.Tk):
                 self.crafted,
                 steals=steals,
                 heavy_hit=heavy_hit,
+                deck_size=self.settings.deck_size,
             )
         except ValueError as exc:
             messagebox.showwarning("Invalid card", str(exc))
@@ -1508,7 +1984,9 @@ class CrashOutApp(tk.Tk):
     def start_match(self) -> None:
         assert self.settings is not None
         if self.settings.vs_bot:
-            bot_deck = make_bot_deck(self.settings.power_points)
+            bot_deck = make_bot_deck(
+                self.settings.power_points, self.settings.deck_size
+            )
             self.players = make_solo_players(
                 self.crafted, bot_deck, self.settings.starting_hp
             )
@@ -1535,51 +2013,6 @@ class CrashOutApp(tk.Tk):
         if not self._game_log or self._game_log[-1] != entry:
             self.append_log(entry)
 
-    def _build_log_panel(self, parent: tk.Misc) -> None:
-        theme = _theme()
-        panel = tk.Frame(
-            parent,
-            bg=theme.log_bg,
-            width=LOG_PANEL_WIDTH,
-            highlightbackground=_shift_hex(theme.screen_bg, 40),
-            highlightthickness=1,
-        )
-        panel.pack(side="right", fill="y")
-        panel.pack_propagate(False)
-
-        tk.Label(
-            panel,
-            text="Game Log",
-            fg=theme.log_fg,
-            bg=theme.log_bg,
-            font=(_font_family(), 11, "bold"),
-        ).pack(anchor="w", padx=12, pady=(12, 6))
-
-        log_frame = tk.Frame(panel, bg=theme.log_bg)
-        log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 10))
-
-        scrollbar = tk.Scrollbar(
-            log_frame, bg=theme.scale_trough, troughcolor=theme.log_bg
-        )
-        scrollbar.pack(side="right", fill="y")
-
-        self.log = tk.Text(
-            log_frame,
-            bg=theme.log_bg,
-            fg=theme.log_fg,
-            insertbackground=theme.log_fg,
-            font=(_font_family(), 10),
-            relief="flat",
-            wrap="word",
-            state="disabled",
-            yscrollcommand=scrollbar.set,
-            padx=8,
-            pady=8,
-        )
-        self.log.pack(side="left", fill="both", expand=True)
-        scrollbar.config(command=self.log.yview)
-        self._render_game_log()
-
     def _render_game_log(self) -> None:
         if self.log is None:
             return
@@ -1601,19 +2034,26 @@ class CrashOutApp(tk.Tk):
             self._game_log.append("Play a card, then choose a target.")
         self._log_turn_banner(banner_msg or f"Turn — {player.name}")
 
-        hud_outer = tk.Frame(self.container, bg=_theme().screen_bg)
+        self._ui_fill = True
+        self.after_idle(self._relayout_ui)
+        theme = _theme()
+        tint = self._bg_tint or theme.screen_bg
+
+        # Pixel-art panel under the play UI (shows in gaps / as base texture).
+        self._ui.update_idletasks()
+        self._install_widget_wallpaper(self._ui, tint)
+
+        hud_outer = tk.Frame(self._ui, bg=tint)
         hud_outer.pack(fill="x", pady=(0, 10))
-        health_bar = tk.Frame(hud_outer, bg=_theme().screen_bg)
+        health_bar = tk.Frame(hud_outer, bg=tint)
         health_bar.pack(anchor="center")
         for i, p in enumerate(self.players):
             chip = PixelHudChip(health_bar, p, is_active=(i == self.active))
             chip.pack(side="left", padx=6)
 
-        body = tk.Frame(self.container, bg=_theme().screen_bg)
-        body.pack(fill="both", expand=True)
-
-        play_area = tk.Frame(body, bg=_theme().screen_bg)
-        play_area.pack(side="left", fill="both", expand=True, padx=(0, 12))
+        play_area = tk.Frame(self._ui, bg=tint)
+        play_area.pack(fill="both", expand=True)
+        self._install_widget_wallpaper(play_area, tint)
 
         ttk.Label(play_area, text="CRASH OUT", style="Title.TLabel").pack()
         ttk.Label(
@@ -1621,16 +2061,25 @@ class CrashOutApp(tk.Tk):
             text=banner_msg or f"Turn — {player.name}",
             style="Body.TLabel",
         ).pack(pady=(4, 6))
+
+        btn_row = tk.Frame(play_area, bg=_theme().screen_bg)
+        btn_row.pack(pady=(0, 10))
         ThemedArtButton(
-            play_area,
+            btn_row,
+            "Log",
+            command=self._show_log_overlay,
+            width=140,
+            height=44,
+            palette="selected",
+        ).pack(side="left", padx=6)
+        ThemedArtButton(
+            btn_row,
             "Reset Game",
             command=self._reset_game,
             width=180,
             height=44,
             palette="heavy_hit",
-        ).pack(pady=(0, 10))
-
-        self._build_log_panel(body)
+        ).pack(side="left", padx=6)
 
         action = tk.Frame(play_area, bg=_theme().screen_bg)
         action.pack(fill="both", expand=True)
@@ -1764,8 +2213,9 @@ class CrashOutApp(tk.Tk):
             bg = theme.screen_bg
             fg = theme.title_fg
         self._set_screen_bg(bg)
-        center = tk.Frame(self.container, bg=bg)
+        center = tk.Frame(self._ui, bg=bg)
         center.pack(expand=True)
+        self._install_widget_wallpaper(center, bg)
         title = "-=You Win=-" if human_won else "-=Game Over=-"
         tk.Label(
             center,
@@ -1813,6 +2263,7 @@ class CrashOutApp(tk.Tk):
             palette="normal",
             bg=bg,
         ).pack(side="left", padx=8)
+        self.after_idle(self._relayout_ui)
 
 
 def main() -> None:

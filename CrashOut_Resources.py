@@ -11,7 +11,12 @@ DEFAULT_STARTING_HP = 100
 DEFAULT_POWER_POINTS = 50
 PLAYER_COUNT_MIN = 1
 PLAYER_COUNT_MAX = 4
-DECK_SIZE = 5
+DECK_SIZE = 5  # default max cards (includes Mercy as last card)
+DECK_SIZE_MIN = 3
+DECK_SIZE_MAX = 12
+# Above this size, duplicate archetypes (Bruiser, etc.) are allowed.
+# Steal / Heavy Hit attributes stay unique regardless.
+ARCHETYPE_UNIQUE_LIMIT = 7
 FIFTH_CARD_HEAL = 25
 STEAL_PP_COST = 25
 HEAVY_HIT_MULTIPLIER = 1.5
@@ -164,6 +169,7 @@ class MatchSettings:
     player_count: int
     starting_hp: int
     power_points: int
+    deck_size: int = DECK_SIZE
 
     @property
     def vs_bot(self) -> bool:
@@ -172,6 +178,19 @@ class MatchSettings:
     @property
     def max_hp(self) -> int:
         return self.starting_hp * 2
+
+    @property
+    def allow_duplicate_archetypes(self) -> bool:
+        return allows_duplicate_archetypes(self.deck_size)
+
+
+def allows_duplicate_archetypes(deck_size: int) -> bool:
+    """Duplicate Sanctuary/Bruiser/etc. when deck is larger than 7."""
+    return deck_size > ARCHETYPE_UNIQUE_LIMIT
+
+
+def clamp_deck_size(deck_size: int) -> int:
+    return max(DECK_SIZE_MIN, min(DECK_SIZE_MAX, deck_size))
 
 
 def name_for_split(damage: int, heal: int, power_points: int) -> str:
@@ -266,10 +285,12 @@ def craft_card(
     *,
     steals: bool = False,
     heavy_hit: bool = False,
+    deck_size: int = DECK_SIZE,
 ) -> Card:
     """
-    Build a craftable card. Raises ValueError if that archetype is already
-    in the deck (no duplicate types allowed).
+    Build a craftable card.
+    Steal and Heavy Hit stay unique. Normal archetypes are unique unless
+    deck_size is above ARCHETYPE_UNIQUE_LIMIT (then duplicates get numbered names).
     """
     if steals and heavy_hit:
         raise ValueError("A card cannot have both steal and Heavy Hit.")
@@ -283,14 +304,16 @@ def craft_card(
     damage = max(0, min(budget, damage))
     heal = budget - damage
     base = "Heavy Hit" if heavy_hit else name_for_split(damage, heal, budget)
-    if archetype_taken(base, existing):
+    allow_dupes = allows_duplicate_archetypes(deck_size)
+    if archetype_taken(base, existing) and not allow_dupes:
         raise ValueError(
             f"Your deck already has a {base} card. "
             "Pick a different damage/heal split."
         )
+    name = uniquify_name(base, existing) if allow_dupes else base
     return Card(
         id=card_id,
-        name=base,
+        name=name,
         damage=damage,
         heal=heal,
         heal_any=False,
@@ -312,21 +335,22 @@ def make_mercy_card(card_id: int = DECK_SIZE, existing: list[Card] | None = None
     )
 
 
-def make_bot_deck(power_points: int) -> list[Card]:
-    specs = [
-        (1, "Caretaker", 1),
-        (2, "Bruiser", 3),
-        (3, "Wrecker", 4),
-        (4, "Sanctuary", 0),
-    ]
+def make_bot_deck(power_points: int, deck_size: int = DECK_SIZE) -> list[Card]:
+    deck_size = clamp_deck_size(deck_size)
+    # Preferred craftable pattern; cycles when deck_size is larger.
+    buckets = [1, 3, 4, 0, 2]  # Caretaker, Bruiser, Wrecker, Sanctuary, Allrounder
+    craftable = max(0, deck_size - 1)
     deck: list[Card] = []
-    for card_id, name, bucket in specs:
+    for i in range(craftable):
+        bucket = buckets[i % len(buckets)]
         damage = damage_for_bucket(bucket, power_points)
         heal = power_points - damage
+        base = name_for_split(damage, heal, power_points)
+        name = uniquify_name(base, deck)
         deck.append(
-            Card(id=card_id, name=name, damage=damage, heal=heal, heal_any=False)
+            Card(id=i + 1, name=name, damage=damage, heal=heal, heal_any=False)
         )
-    deck.append(make_mercy_card(DECK_SIZE))
+    deck.append(make_mercy_card(deck_size, deck))
     return deck
 
 
@@ -350,7 +374,6 @@ def shuffle_and_deal_hands(player_decks: list[list[Card]]) -> list[list[Card]]:
     """Shuffle craftable cards only; Mercy and steal cards stay with their owner."""
     if not player_decks:
         return []
-    n = len(player_decks)
     protected_hands: list[list[Card]] = []
     shuffle_pool: list[Card] = []
 
@@ -360,7 +383,7 @@ def shuffle_and_deal_hands(player_decks: list[list[Card]]) -> list[list[Card]]:
         protected_hands.append(protected)
         shuffle_pool.extend(shuffleable)
 
-    quotas = [DECK_SIZE - len(protected) for protected in protected_hands]
+    quotas = [len(deck) - len(protected) for deck, protected in zip(player_decks, protected_hands)]
     if sum(quotas) != len(shuffle_pool):
         raise ValueError(
             f"Shuffle pool size {len(shuffle_pool)} does not match deal quotas {quotas}."
