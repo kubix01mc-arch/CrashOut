@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import tkinter as tk
 from pathlib import Path
@@ -16,6 +17,7 @@ except ImportError:
     HAS_PIL = False
 
 from CrashOut_Resources import (
+    BOT_NAME,
     DEFAULT_POWER_POINTS,
     DEFAULT_STARTING_HP,
     DECK_SIZE,
@@ -41,11 +43,11 @@ from CrashOut_Resources import (
     deck_has_heavy_hit,
     deck_has_steal,
     describe_target,
-    effective_card_stats,
     make_bot_deck,
     make_mercy_card,
     make_players_from_mixed_decks,
     make_solo_players,
+    mark_card_played,
     name_for_split,
     next_alive_index,
     resolve_card,
@@ -62,8 +64,44 @@ CARD_MAX_W = 200
 CARD_GAP_MIN = 6
 TARGET_MIN = 100
 TARGET_MAX = 200
+SCREEN_BG = "#1a1f1c"
+WIN_BG = "#1f5a32"
+LOSE_BG = "#6b1f1f"
 LOG_PANEL_WIDTH = 300
+PREVIEW_CARD_W = 168
+DECK_MINI_W = 110
 BOT_ICON_PATH = Path(__file__).resolve().parent / "assets" / "bot_icon.png"
+# Packaged as arial.ttf; the font's real family name is "Minecraft".
+ARIAL_FONT_PATH = (
+    Path(__file__).resolve().parent
+    / "Minecraft-20230518T220806Z-001 (1)"
+    / "Minecraft"
+    / "arial.ttf"
+)
+UI_FONT_FAMILY = "Minecraft"
+LOG_FONT_FAMILY = "Minecraft"
+FR_PRIVATE = 0x10
+HWND_BROADCAST = 0xFFFF
+WM_FONTCHANGE = 0x001D
+
+
+def _register_font_file(font_path: Path) -> None:
+    """Register a .ttf/.otf for the current process (Windows)."""
+    if not font_path.exists() or not hasattr(ctypes, "windll"):
+        return
+    add_ex = getattr(ctypes.windll.gdi32, "AddFontResourceExW", None)
+    if add_ex is None:
+        return
+    try:
+        add_ex(str(font_path), FR_PRIVATE, None)
+        ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_FONTCHANGE, 0, 0)
+    except Exception:
+        pass
+
+
+def _ensure_minecraft_fonts_loaded() -> None:
+    """Load arial.ttf from the extracted Minecraft fonts folder."""
+    _register_font_file(ARIAL_FONT_PATH)
 
 
 def card_size_for_area(
@@ -107,27 +145,81 @@ def target_size_for_area(area_w: int, area_h: int, num_targets: int) -> tuple[in
     return max(TARGET_MIN, size), gap
 
 
-def _rounded_rect_points(x1: int, y1: int, x2: int, y2: int, r: int) -> list[int]:
-    """Point list for a smooth rounded rectangle polygon."""
-    r = min(r, (x2 - x1) // 2, (y2 - y1) // 2)
-    return [
-        x1 + r, y1,
-        x2 - r, y1,
-        x2, y1,
-        x2, y1 + r,
-        x2, y2 - r,
-        x2, y2,
-        x2 - r, y2,
-        x1 + r, y2,
-        x1, y2,
-        x1, y2 - r,
-        x1, y1 + r,
-        x1, y1,
-    ]
+def _shift_hex(color: str, delta: int) -> str:
+    raw = color.lstrip("#")
+    rgb = [max(0, min(255, int(raw[i : i + 2], 16) + delta)) for i in (0, 2, 4)]
+    return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
+
+
+def _pixel_scale(size: int) -> int:
+    return max(2, size // 28)
+
+
+def _mc_font_size(size: int) -> int:
+    """Minecraft bitmap fonts stay crisp on an 8px grid."""
+    return max(8, int(round(size / 8) * 8))
+
+
+def _draw_pixel_panel(
+    canvas: tk.Canvas,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    fill: str,
+    accent: str,
+    scale: int,
+) -> None:
+    """Minecraft-style beveled panel with 1-pixel corner cuts."""
+    s = scale
+    highlight = _shift_hex(fill, 38)
+    shadow = _shift_hex(fill, -40)
+    outline = _shift_hex(accent, -50)
+
+    canvas.create_rectangle(
+        x1 + s, y1, x2 - s, y2, fill=fill, outline="", width=0
+    )
+    canvas.create_rectangle(
+        x1, y1 + s, x2, y2 - s, fill=fill, outline="", width=0
+    )
+
+    canvas.create_rectangle(x1 + s, y1, x2 - s, y1 + s, fill=outline, outline="", width=0)
+    canvas.create_rectangle(x1 + s, y2 - s, x2 - s, y2, fill=outline, outline="", width=0)
+    canvas.create_rectangle(x1, y1 + s, x1 + s, y2 - s, fill=outline, outline="", width=0)
+    canvas.create_rectangle(x2 - s, y1 + s, x2, y2 - s, fill=outline, outline="", width=0)
+
+    canvas.create_rectangle(
+        x1 + s, y1 + s, x2 - s, y1 + 2 * s, fill=highlight, outline="", width=0
+    )
+    canvas.create_rectangle(
+        x1 + s, y1 + s, x1 + 2 * s, y2 - s, fill=highlight, outline="", width=0
+    )
+    canvas.create_rectangle(
+        x1 + s, y2 - 2 * s, x2 - s, y2 - s, fill=shadow, outline="", width=0
+    )
+    canvas.create_rectangle(
+        x2 - 2 * s, y1 + s, x2 - s, y2 - s, fill=shadow, outline="", width=0
+    )
+
+    inner = 3 * s
+    ix1, iy1, ix2, iy2 = x1 + inner, y1 + inner, x2 - inner, y2 - inner
+    if ix2 - ix1 > 4 * s and iy2 - iy1 > 4 * s:
+        canvas.create_rectangle(
+            ix1 + s, iy1, ix2 - s, iy1 + s, fill=accent, outline="", width=0
+        )
+        canvas.create_rectangle(
+            ix1 + s, iy2 - s, ix2 - s, iy2, fill=accent, outline="", width=0
+        )
+        canvas.create_rectangle(
+            ix1, iy1 + s, ix1 + s, iy2 - s, fill=accent, outline="", width=0
+        )
+        canvas.create_rectangle(
+            ix2 - s, iy1 + s, ix2, iy2 - s, fill=accent, outline="", width=0
+        )
 
 
 class RoundedCardButton(tk.Canvas):
-    """Clickable rounded-rectangle card face (5:7 aspect ratio)."""
+    """Clickable pixel-art card face (5:7 aspect ratio)."""
 
     def __init__(
         self,
@@ -148,7 +240,7 @@ class RoundedCardButton(tk.Canvas):
             bg="#1a1f1c",
             highlightthickness=0,
             bd=0,
-            cursor="arrow" if disabled else "hand2",
+            cursor="arrow" if disabled or command is None else "hand2",
         )
         self.card = card
         self.command = command
@@ -173,68 +265,67 @@ class RoundedCardButton(tk.Canvas):
         self.configure(width=width, height=height)
         self._draw(self._hover)
 
-    def _radius(self) -> int:
-        return max(6, min(self._width, self._height) // 8)
+    def set_card(self, card: Card, *, disabled: bool | None = None) -> None:
+        self.card = card
+        if disabled is not None:
+            self.disabled = disabled
+            self.configure(cursor="arrow" if self.disabled or self.command is None else "hand2")
+        self._draw(self._hover)
 
-    def _font(self, ratio: float, minimum: int = 7) -> tuple[str, int, str]:
-        size = max(minimum, int(min(self._width, self._height) * ratio))
-        return ("Segoe UI", size, "bold")
+    def _font(self, ratio: float, minimum: int = 8) -> tuple[str, int, str]:
+        size = _mc_font_size(max(minimum, int(min(self._width, self._height) * ratio)))
+        return (UI_FONT_FAMILY, size, "bold")
 
-    def _font_regular(self, ratio: float, minimum: int = 7) -> tuple[str, int]:
-        size = max(minimum, int(min(self._width, self._height) * ratio))
-        return ("Segoe UI", size)
+    def _font_regular(self, ratio: float, minimum: int = 8) -> tuple[str, int]:
+        size = _mc_font_size(max(minimum, int(min(self._width, self._height) * ratio)))
+        return (UI_FONT_FAMILY, size)
 
     def _fill_colors(self) -> tuple[str, str, str]:
         if self.disabled:
-            return "#2a302c", "#5a635c", "#7a847c"
+            return "#2a302c", "#6a736c", "#8a948c"
         if self.selected:
-            return "#3d5a45", "#f0c674", "#f7f0e0"
+            return "#3d5a45", "#f0c674", "#fff6d8"
         if self.card.heal_any:
-            return "#2e4a3a", "#8fd6a8", "#e8f8ee"
-        return "#2c3330", "#c4b59a", "#f2e9d8"
+            return "#1e3d2a", "#6ecf8a", "#d8ffe6"
+        if self.card.heavy_hit:
+            return "#4a241c", "#e07a5f", "#ffe4d8"
+        if self.card.steals:
+            return "#2e2240", "#c9a0dc", "#f3e6ff"
+        return "#3a3228", "#d4b483", "#f7edd8"
 
     def _draw(self, hover: bool = False) -> None:
         self.delete("all")
         fill, accent, text_color = self._fill_colors()
         if hover and not self.disabled:
-            fill = "#3a4540"
-        pad = max(2, self._width // 36)
+            fill = _shift_hex(fill, 22)
+        scale = _pixel_scale(self._width)
+        pad = scale
         x1, y1 = pad, pad
         x2, y2 = self._width - pad, self._height - pad
-        radius = self._radius()
-        points = _rounded_rect_points(x1, y1, x2, y2, radius)
-        self.create_polygon(
-            points,
-            smooth=True,
-            splinesteps=12,
-            fill=fill,
-            outline=accent,
-            width=max(1, self._width // 55),
-        )
-        inset = max(3, self._width // 22)
-        inner = _rounded_rect_points(
-            x1 + inset, y1 + inset, x2 - inset, y2 - inset, max(4, radius - 4)
-        )
-        self.create_polygon(
-            inner,
-            smooth=True,
-            splinesteps=12,
-            fill="",
-            outline=accent,
-            width=1,
-        )
+        _draw_pixel_panel(self, x1, y1, x2, y2, fill, accent, scale)
 
         cx = self._width // 2
-        title_y = int(self._height * 0.18)
-        stats_y = int(self._height * 0.52)
-        detail_y = int(self._height * 0.84)
+        title_y = y1 + 7 * scale
+        stats_y = int(self._height * 0.54)
+        detail_y = y2 - 6 * scale
+        divider_y1 = int(self._height * 0.30)
+        divider_y2 = int(self._height * 0.76)
+        div_x1 = x1 + 5 * scale
+        div_x2 = x2 - 5 * scale
+        self.create_rectangle(
+            div_x1, divider_y1, div_x2, divider_y1 + scale, fill=accent, outline="", width=0
+        )
+        self.create_rectangle(
+            div_x1, divider_y2, div_x2, divider_y2 + scale, fill=accent, outline="", width=0
+        )
+
         self.create_text(
             cx,
             title_y,
-            text=self.card.name,
+            text=self.card.name.upper(),
             fill=text_color,
-            font=self._font(0.11, 8),
-            width=self._width - max(12, self._width // 6),
+            font=self._font(0.10, 8),
+            width=self._width - 10 * scale,
             justify="center",
         )
         stats, detail = self.card.face_stats()
@@ -242,12 +333,13 @@ class RoundedCardButton(tk.Canvas):
             detail = "cooling down"
         elif self.card.is_borrowed:
             detail = "borrowed"
+
         self.create_text(
             cx,
             stats_y,
             text=stats,
             fill=accent,
-            font=self._font(0.14, 10),
+            font=self._font(0.13, 8),
             justify="center",
         )
         self.create_text(
@@ -255,8 +347,8 @@ class RoundedCardButton(tk.Canvas):
             detail_y,
             text=detail,
             fill=text_color,
-            font=self._font_regular(0.08, 7),
-            width=self._width - max(10, self._width // 7),
+            font=self._font_regular(0.08, 8),
+            width=self._width - 8 * scale,
             justify="center",
         )
 
@@ -337,6 +429,7 @@ class RoundedTargetButton(tk.Canvas):
     def _draw_badge(self, cx: int, cy: int, accent: str, text_color: str) -> None:
         if self.player.is_bot and self._bot_photo_getter is not None:
             icon_size = max(32, int(self._size * 0.42))
+            icon_size = (icon_size // 8) * 8
             photo = self._bot_photo_getter(icon_size)
             if photo is not None:
                 self._bot_photo = photo
@@ -348,7 +441,7 @@ class RoundedTargetButton(tk.Canvas):
             cy,
             text=number,
             fill=accent,
-            font=("Segoe UI", max(18, self._size // 3), "bold"),
+            font=(UI_FONT_FAMILY, _mc_font_size(max(16, self._size // 3)), "bold"),
             justify="center",
         )
 
@@ -356,17 +449,9 @@ class RoundedTargetButton(tk.Canvas):
         self.delete("all")
         fill, accent, text_color = self._colors(hover)
         s = self._size
-        pad = max(3, s // 24)
-        radius = max(10, s // 6)
-        points = _rounded_rect_points(pad, pad, s - pad, s - pad, radius)
-        self.create_polygon(
-            points,
-            smooth=True,
-            splinesteps=12,
-            fill=fill,
-            outline=accent,
-            width=max(1, s // 50),
-        )
+        scale = _pixel_scale(s)
+        pad = scale
+        _draw_pixel_panel(self, pad, pad, s - pad, s - pad, fill, accent, scale)
         cx = s // 2
         self._draw_badge(cx, int(s * 0.34), accent, text_color)
         self.create_text(
@@ -374,7 +459,7 @@ class RoundedTargetButton(tk.Canvas):
             int(s * 0.62),
             text=f"{self.player.hp}/{self.player.max_hp}",
             fill=accent,
-            font=("Segoe UI", max(10, s // 9), "bold"),
+            font=(UI_FONT_FAMILY, _mc_font_size(max(8, s // 9)), "bold"),
             justify="center",
         )
         self.create_text(
@@ -382,8 +467,8 @@ class RoundedTargetButton(tk.Canvas):
             int(s * 0.82),
             text=self.subtitle,
             fill=text_color,
-            font=("Segoe UI", max(7, s // 14)),
-            width=s - pad * 4,
+            font=(UI_FONT_FAMILY, _mc_font_size(max(8, s // 14))),
+            width=s - pad * 6,
             justify="center",
         )
 
@@ -400,8 +485,66 @@ class RoundedTargetButton(tk.Canvas):
         self._draw(hover=False)
 
 
+HUD_CHIP_W = 152
+HUD_CHIP_H = 72
+
+
+class PixelHudChip(tk.Canvas):
+    """Pixel-art HP chip; the active player's panel is the turn indicator."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        player: Player,
+        *,
+        is_active: bool,
+    ) -> None:
+        super().__init__(
+            parent,
+            width=HUD_CHIP_W,
+            height=HUD_CHIP_H,
+            bg="#1a1f1c",
+            highlightthickness=0,
+            bd=0,
+        )
+        self.player = player
+        self.is_active = is_active
+        self._draw()
+
+    def _draw(self) -> None:
+        self.delete("all")
+        if not self.player.alive:
+            fill, accent, text_color = "#2a302c", "#6a736c", "#8a948c"
+        elif self.is_active:
+            fill, accent, text_color = "#3d5a45", "#f0c674", "#fff6d8"
+        else:
+            fill, accent, text_color = "#2c3330", "#8a948c", "#c4b59a"
+        scale = 3
+        _draw_pixel_panel(self, 0, 0, HUD_CHIP_W, HUD_CHIP_H, fill, accent, scale)
+        cx = HUD_CHIP_W // 2
+        name = self.player.name.upper()
+        self.create_text(
+            cx,
+            22,
+            text=name,
+            fill=accent if self.is_active else text_color,
+            font=(UI_FONT_FAMILY, 8, "bold" if self.is_active else "normal"),
+            justify="center",
+        )
+        hp_text = f"{self.player.hp}/{self.player.max_hp} HP" if self.player.alive else "OUT"
+        self.create_text(
+            cx,
+            48,
+            text=hp_text,
+            fill=accent if self.player.alive else text_color,
+            font=(UI_FONT_FAMILY, 16, "bold"),
+            justify="center",
+        )
+
+
 class CrashOutApp(tk.Tk):
     def __init__(self) -> None:
+        _ensure_minecraft_fonts_loaded()
         super().__init__()
         self.title("Crash Out")
         self.geometry("920x700")
@@ -432,7 +575,8 @@ class CrashOutApp(tk.Tk):
         self._target_row: tk.Frame | None = None
         self._target_buttons: list[RoundedTargetButton] = []
         self._bot_photo_cache: dict[int, tk.PhotoImage] = {}
-        self.preview: ttk.Label | None = None
+        self.preview: RoundedCardButton | None = None
+        self.preview_status: ttk.Label | None = None
         self.save_btn: ttk.Button | None = None
 
         self.style = ttk.Style(self)
@@ -442,23 +586,54 @@ class CrashOutApp(tk.Tk):
             pass
         self.style.configure(
             "Title.TLabel",
-            font=("Segoe UI", 22, "bold"),
+            font=(UI_FONT_FAMILY, 22, "bold"),
             foreground="#f2e9d8",
             background="#1a1f1c",
         )
         self.style.configure(
             "Body.TLabel",
-            font=("Segoe UI", 11),
+            font=(UI_FONT_FAMILY, 11),
             foreground="#d7d2c4",
             background="#1a1f1c",
         )
         self.style.configure(
             "Log.TLabel",
-            font=("Consolas", 10),
+            font=(LOG_FONT_FAMILY, 10),
             foreground="#c8e6c0",
             background="#121612",
         )
-        self.style.configure("Accent.TButton", font=("Segoe UI", 11, "bold"))
+        self.style.configure("Accent.TButton", font=(UI_FONT_FAMILY, 11, "bold"))
+        self.style.configure(
+            "SetupTitle.TLabel",
+            font=(UI_FONT_FAMILY, 32, "bold"),
+            foreground="#f2e9d8",
+            background="#1a1f1c",
+        )
+        self.style.configure(
+            "SetupBody.TLabel",
+            font=(UI_FONT_FAMILY, 16),
+            foreground="#d7d2c4",
+            background="#1a1f1c",
+        )
+        self.style.configure(
+            "Setup.TButton",
+            font=(UI_FONT_FAMILY, 16, "bold"),
+            padding=(16, 8),
+        )
+        self.style.configure(
+            "Setup.TCombobox",
+            font=(UI_FONT_FAMILY, 16),
+        )
+        self.style.configure(
+            "Setup.TEntry",
+            font=(UI_FONT_FAMILY, 16),
+        )
+        self.style.configure(
+            "Lab.TCheckbutton",
+            font=(UI_FONT_FAMILY, 16),
+            background="#1a1f1c",
+            foreground="#d7d2c4",
+        )
         self.style.configure(
             "Green.Horizontal.TScale",
             troughcolor="#243028",
@@ -486,12 +661,19 @@ class CrashOutApp(tk.Tk):
         self.container.lower(self._overlay_host)
         tk.Misc.tkraise(self._overlay_host)
 
+    def _set_screen_bg(self, color: str) -> None:
+        self.configure(bg=color)
+        self.container.configure(bg=color)
+        self._overlay_host.configure(bg=color)
+
     def clear(self) -> None:
         self._hide_target_overlay()
         self._card_faces = []
         self._hand_outer = None
         self.preview = None
+        self.preview_status = None
         self.save_btn = None
+        self._set_screen_bg(SCREEN_BG)
         for w in self.container.winfo_children():
             w.destroy()
 
@@ -592,7 +774,7 @@ class CrashOutApp(tk.Tk):
             text=f"Choose target for {card.name}",
             fg="#f2e9d8",
             bg="#222824",
-            font=("Segoe UI", 14, "bold"),
+            font=(UI_FONT_FAMILY, 14, "bold"),
         ).pack(pady=(0, 12))
 
         self._target_row = tk.Frame(panel, bg="#222824", width=560, height=220)
@@ -651,26 +833,28 @@ class CrashOutApp(tk.Tk):
 
     def show_setup(self) -> None:
         self.clear()
-        ttk.Label(self.container, text="CRASH OUT", style="Title.TLabel").pack(
-            anchor="w"
-        )
+        center = tk.Frame(self.container, bg="#1a1f1c")
+        center.pack(expand=True)
+
+        ttk.Label(center, text="CRASH OUT", style="SetupTitle.TLabel").pack()
         ttk.Label(
-            self.container,
+            center,
             text=(
                 "Window mode — craft cards, then play hotseat or vs bot. "
                 "In multiplayer, each player builds a deck; craftable cards are then "
                 "shuffled and re-dealt (Mercy and steal stay with their owner)."
             ),
-            style="Body.TLabel",
-            wraplength=860,
-        ).pack(anchor="w", pady=(4, 16))
+            style="SetupBody.TLabel",
+            wraplength=720,
+            justify="center",
+        ).pack(pady=(12, 28))
 
-        form = tk.Frame(self.container, bg="#1a1f1c")
-        form.pack(fill="x")
+        form = tk.Frame(center, bg="#1a1f1c")
+        form.pack()
 
         self.mode_var = tk.StringVar(value="1")
-        ttk.Label(form, text="Match size", style="Body.TLabel").grid(
-            row=0, column=0, sticky="w", pady=6
+        ttk.Label(form, text="Match size", style="SetupBody.TLabel").grid(
+            row=0, column=0, sticky="e", pady=8, padx=8
         )
         modes = ttk.Combobox(
             form,
@@ -682,39 +866,50 @@ class CrashOutApp(tk.Tk):
                 "4 players",
             ],
             state="readonly",
-            width=22,
+            width=18,
+            font=(UI_FONT_FAMILY, 16),
+            style="Setup.TCombobox",
         )
         modes.current(0)
         modes.grid(row=0, column=1, sticky="w", padx=8)
 
         self.hp_var = tk.StringVar(value=str(DEFAULT_STARTING_HP))
-        ttk.Label(form, text="Starting HP", style="Body.TLabel").grid(
-            row=1, column=0, sticky="w", pady=6
+        ttk.Label(form, text="Starting HP", style="SetupBody.TLabel").grid(
+            row=1, column=0, sticky="e", pady=8, padx=8
         )
-        ttk.Entry(form, textvariable=self.hp_var, width=12).grid(
-            row=1, column=1, sticky="w", padx=8
-        )
+        ttk.Entry(
+            form,
+            textvariable=self.hp_var,
+            width=12,
+            font=(UI_FONT_FAMILY, 16),
+            style="Setup.TEntry",
+        ).grid(row=1, column=1, sticky="w", padx=8)
 
         self.pp_var = tk.StringVar(value=str(DEFAULT_POWER_POINTS))
-        ttk.Label(form, text="Power points / card", style="Body.TLabel").grid(
-            row=2, column=0, sticky="w", pady=6
+        ttk.Label(form, text="Power points / card", style="SetupBody.TLabel").grid(
+            row=2, column=0, sticky="e", pady=8, padx=8
         )
-        ttk.Entry(form, textvariable=self.pp_var, width=12).grid(
-            row=2, column=1, sticky="w", padx=8
-        )
+        ttk.Entry(
+            form,
+            textvariable=self.pp_var,
+            width=12,
+            font=(UI_FONT_FAMILY, 16),
+            style="Setup.TEntry",
+        ).grid(row=2, column=1, sticky="w", padx=8)
 
         ttk.Label(
-            self.container,
-            text=f"Max HP = 2× starting. Card 5 = Mercy ({FIFTH_CARD_HEAL} heal any target).",
-            style="Body.TLabel",
-        ).pack(anchor="w", pady=(18, 8))
+            center,
+            text=f"Max HP = 2x starting. Card 5 = Mercy ({FIFTH_CARD_HEAL} heal any target).",
+            style="SetupBody.TLabel",
+            justify="center",
+        ).pack(pady=(24, 12))
 
         ttk.Button(
-            self.container,
+            center,
             text="Continue to Card Lab",
-            style="Accent.TButton",
+            style="Setup.TButton",
             command=self.begin_card_lab,
-        ).pack(anchor="w", pady=12)
+        ).pack(pady=8)
 
     def begin_card_lab(self) -> None:
         try:
@@ -769,104 +964,122 @@ class CrashOutApp(tk.Tk):
                 f"(damage + heal). Craftable cards are shuffled and re-dealt when "
                 f"everyone is done. Mercy and steal stay with their owner."
             )
+        lab = tk.Frame(self.container, bg="#1a1f1c")
+        lab.pack(expand=True)
         ttk.Label(
-            self.container,
+            lab,
             text=lab_title,
-            style="Title.TLabel",
-        ).pack(anchor="w")
+            style="SetupTitle.TLabel",
+        ).pack()
         steal_hint = (
             f" Optional: one steal card per deck ({STEAL_PP_COST} PP), "
-            "or one Heavy Hit (+50% power, clears target cooldowns 2 turns)."
+            "or one Heavy Hit (+50% power, 2-turn cooldown, clears target cooldowns 2 turns)."
             if (can_craft_steal(pp) or can_add_heavy_hit_card(self.crafted))
             and not self.settings.vs_bot
             else (
-                " Optional: one Heavy Hit per deck (+50% power, clears target cooldowns 2 turns)."
+                " Optional: one Heavy Hit per deck (+50% power, 2-turn cooldown, clears target cooldowns 2 turns)."
                 if can_add_heavy_hit_card(self.crafted)
                 else ""
             )
         )
         ttk.Label(
-            self.container,
+            lab,
             text=(
                 f"{lab_hint}{steal_hint} "
                 "No duplicate types (Sanctuary / Caretaker / Allrounder / Bruiser / Wrecker)."
             ),
-            style="Body.TLabel",
-            wraplength=860,
-        ).pack(anchor="w", pady=(4, 12))
+            style="SetupBody.TLabel",
+            wraplength=800,
+            justify="center",
+        ).pack(pady=(8, 16))
 
         self.steal_var = tk.BooleanVar(value=False)
         self.heavy_hit_var = tk.BooleanVar(value=False)
         if can_add_steal_card(self.crafted, pp) and not self.settings.vs_bot:
             ttk.Checkbutton(
-                self.container,
+                lab,
                 text=(
                     f"Steal ability ({STEAL_PP_COST} PP) — "
                     "steal 1 opponent card for 1 turn (one per deck)"
                 ),
                 variable=self.steal_var,
                 command=self._on_steal_toggle,
-            ).pack(anchor="w", pady=(0, 4))
+                style="Lab.TCheckbutton",
+            ).pack(pady=(0, 4))
         elif deck_has_steal(self.crafted):
             ttk.Label(
-                self.container,
+                lab,
                 text="Steal already used in this deck (one per deck).",
-                style="Body.TLabel",
-            ).pack(anchor="w", pady=(0, 4))
+                style="SetupBody.TLabel",
+            ).pack(pady=(0, 4))
 
         if can_add_heavy_hit_card(self.crafted):
             ttk.Checkbutton(
-                self.container,
+                lab,
                 text=(
-                    "Heavy Hit — +50% damage/heal, clears target cooldowns for "
-                    "2 turns (one per deck)"
+                    "Heavy Hit — +50% damage/heal, 2-turn cooldown, clears target "
+                    "cooldowns for 2 turns (one per deck)"
                 ),
                 variable=self.heavy_hit_var,
                 command=self._on_heavy_hit_toggle,
-            ).pack(anchor="w", pady=(0, 8))
+                style="Lab.TCheckbutton",
+            ).pack(pady=(0, 8))
         elif deck_has_heavy_hit(self.crafted):
             ttk.Label(
-                self.container,
+                lab,
                 text="Heavy Hit already used in this deck (one per deck).",
-                style="Body.TLabel",
-            ).pack(anchor="w", pady=(0, 8))
+                style="SetupBody.TLabel",
+            ).pack(pady=(0, 8))
 
         budget = stat_budget(pp, self.steal_var.get())
         self.damage_var = tk.IntVar(value=budget // 2 if budget else 0)
-        row = tk.Frame(self.container, bg="#1a1f1c")
-        row.pack(fill="x", pady=8)
-        ttk.Label(row, text="Damage points", style="Body.TLabel").pack(side="left")
+        row = tk.Frame(lab, bg="#1a1f1c")
+        row.pack(pady=8)
+        ttk.Label(row, text="Damage points", style="SetupBody.TLabel").pack(side="left")
         self._craft_scale = ttk.Scale(
             row,
             from_=0,
             to=max(0, budget),
             orient="horizontal",
+            length=480,
             style="Green.Horizontal.TScale",
             command=self._on_damage_slide,
         )
-        self._craft_scale.pack(side="left", fill="x", expand=True, padx=12)
-        self.preview = ttk.Label(self.container, text="", style="Body.TLabel")
-        self.preview.pack(anchor="w", pady=8)
+        self._craft_scale.pack(side="left", padx=12)
+
+        preview_row = tk.Frame(lab, bg="#1a1f1c")
+        preview_row.pack(pady=12)
+        placeholder = Card(self.craft_slot, "Allrounder", 0, 0)
+        self.preview = RoundedCardButton(
+            preview_row,
+            placeholder,
+            width=PREVIEW_CARD_W,
+        )
+        self.preview.pack()
+        self.preview_status = ttk.Label(lab, text="", style="SetupBody.TLabel")
+        self.preview_status.pack(pady=(8, 0))
+
         self.save_btn = ttk.Button(
-            self.container,
+            lab,
             text="Save card",
-            style="Accent.TButton",
+            style="Setup.TButton",
             command=self.save_crafted_card,
         )
-        self.save_btn.pack(anchor="w", pady=16)
+        self.save_btn.pack(pady=12)
         if budget:
             self._craft_scale.set(budget // 2)
         else:
             self._on_damage_slide("0")
 
         if self.crafted:
-            ttk.Label(self.container, text="Deck so far:", style="Body.TLabel").pack(
-                anchor="w", pady=(8, 4)
+            ttk.Label(lab, text="Deck so far:", style="SetupBody.TLabel").pack(
+                pady=(8, 4)
             )
-            for i, c in enumerate(self.crafted, start=1):
-                ttk.Label(
-                    self.container, text=f"  [{i}] {c.label()}", style="Body.TLabel"
-                ).pack(anchor="w")
+            deck_row = tk.Frame(lab, bg="#1a1f1c")
+            deck_row.pack()
+            for c in self.crafted:
+                face = RoundedCardButton(deck_row, c, width=DECK_MINI_W)
+                face.pack(side="left", padx=6, pady=4)
 
     def _craft_budget(self) -> int:
         assert self.settings is not None
@@ -896,8 +1109,11 @@ class CrashOutApp(tk.Tk):
     def _on_damage_slide(self, value: str) -> None:
         assert self.settings is not None
         preview_ok = self.preview is not None and self.preview.winfo_exists()
+        status_ok = (
+            self.preview_status is not None and self.preview_status.winfo_exists()
+        )
         save_ok = self.save_btn is not None and self.save_btn.winfo_exists()
-        if not preview_ok or not save_ok:
+        if not preview_ok or not status_ok or not save_ok:
             return
         budget = self._craft_budget()
         damage = int(float(value))
@@ -905,24 +1121,26 @@ class CrashOutApp(tk.Tk):
         heal = budget - damage
         self.damage_var.set(damage)
         archetype = name_for_split(damage, heal, budget if budget else 1)
-        if self.heavy_hit_var.get():
-            eff_dmg, eff_heal = effective_card_stats(
-                Card(0, "Heavy Hit", damage, heal, heavy_hit=True)
-            )
-            preview_name = f"Heavy Hit — {eff_dmg} dmg / {eff_heal} heal (+50%)"
-        else:
-            preview_name = f"{archetype} — {damage} dmg / {heal} heal"
-            if self.steal_var.get():
-                preview_name += " + steal"
-        if archetype_taken(
-            "Heavy Hit" if self.heavy_hit_var.get() else archetype, self.crafted
-        ):
-            self.preview.configure(
-                text=f"Preview: {preview_name} (already in deck — pick another split)"
+        heavy_hit = self.heavy_hit_var.get()
+        steals = self.steal_var.get()
+        name = "Heavy Hit" if heavy_hit else archetype
+        card = Card(
+            id=self.craft_slot,
+            name=name,
+            damage=damage,
+            heal=heal,
+            steals=steals,
+            heavy_hit=heavy_hit,
+        )
+        taken = archetype_taken(name, self.crafted)
+        self.preview.set_card(card, disabled=taken)
+        if taken:
+            self.preview_status.configure(
+                text="Already in deck — pick another split."
             )
             self.save_btn.state(["disabled"])
         else:
-            self.preview.configure(text=f"Preview: {preview_name}")
+            self.preview_status.configure(text="")
             self.save_btn.state(["!disabled"])
 
     def save_crafted_card(self) -> None:
@@ -1004,7 +1222,7 @@ class CrashOutApp(tk.Tk):
             text="Game Log",
             fg="#c8e6c0",
             bg="#121612",
-            font=("Segoe UI", 11, "bold"),
+            font=(UI_FONT_FAMILY, 11, "bold"),
         ).pack(anchor="w", padx=12, pady=(12, 6))
 
         log_frame = tk.Frame(panel, bg="#121612")
@@ -1018,7 +1236,7 @@ class CrashOutApp(tk.Tk):
             bg="#121612",
             fg="#c8e6c0",
             insertbackground="#c8e6c0",
-            font=("Consolas", 10),
+            font=(LOG_FONT_FAMILY, 10),
             relief="flat",
             wrap="word",
             state="disabled",
@@ -1051,34 +1269,11 @@ class CrashOutApp(tk.Tk):
 
         hud_outer = tk.Frame(self.container, bg="#1a1f1c")
         hud_outer.pack(fill="x", pady=(0, 10))
-        health_bar = tk.Frame(
-            hud_outer,
-            bg="#243028",
-            padx=18,
-            pady=10,
-            highlightbackground="#4a5a50",
-            highlightthickness=1,
-        )
+        health_bar = tk.Frame(hud_outer, bg="#1a1f1c")
         health_bar.pack(anchor="center")
         for i, p in enumerate(self.players):
-            chip = tk.Frame(health_bar, bg="#243028")
-            chip.pack(side="left", padx=10)
-            name_color = "#f0c674" if i == self.active else "#b8c4bc"
-            hp_color = "#f2e9d8" if p.alive else "#8a948c"
-            tk.Label(
-                chip,
-                text=p.name + ("  <<" if i == self.active else ""),
-                fg=name_color,
-                bg="#243028",
-                font=("Segoe UI", 10, "bold" if i == self.active else "normal"),
-            ).pack()
-            tk.Label(
-                chip,
-                text=f"{p.hp}/{p.max_hp} HP" if p.alive else "OUT",
-                fg=hp_color,
-                bg="#243028",
-                font=("Segoe UI", 16, "bold"),
-            ).pack()
+            chip = PixelHudChip(health_bar, p, is_active=(i == self.active))
+            chip.pack(side="left", padx=6)
 
         body = tk.Frame(self.container, bg="#1a1f1c")
         body.pack(fill="both", expand=True)
@@ -1086,14 +1281,12 @@ class CrashOutApp(tk.Tk):
         play_area = tk.Frame(body, bg="#1a1f1c")
         play_area.pack(side="left", fill="both", expand=True, padx=(0, 12))
 
-        ttk.Label(play_area, text="CRASH OUT", style="Title.TLabel").pack(
-            anchor="w"
-        )
+        ttk.Label(play_area, text="CRASH OUT", style="Title.TLabel").pack()
         ttk.Label(
             play_area,
             text=banner_msg or f"Turn — {player.name}",
             style="Body.TLabel",
-        ).pack(anchor="w", pady=(2, 10))
+        ).pack(pady=(4, 10))
 
         self._build_log_panel(body)
 
@@ -1107,11 +1300,11 @@ class CrashOutApp(tk.Tk):
         if player.is_bot:
             ttk.Label(
                 action, text="Bot is thinking...", style="Body.TLabel"
-            ).pack(anchor="w")
+            ).pack()
             self.after(TURN_DELAY_MS, self.run_bot_turn)
             return
 
-        ttk.Label(action, text="Your hand", style="Body.TLabel").pack(anchor="w")
+        ttk.Label(action, text="Your hand", style="Body.TLabel").pack()
         self._hand_outer = tk.Frame(action, bg="#1a1f1c")
         self._hand_outer.pack(fill="both", expand=True, pady=8)
         self._card_faces = []
@@ -1154,7 +1347,7 @@ class CrashOutApp(tk.Tk):
         self._hide_target_overlay()
         card = self.pending_card
         player = self.players[self.active]
-        player.last_card_id = card.id
+        mark_card_played(player, card)
         self.append_log(f"{player.name} plays {card.name}")
         self.append_log(
             f"Target: {describe_target(card, self.players, self.active, target_idx)}"
@@ -1178,10 +1371,12 @@ class CrashOutApp(tk.Tk):
             )
             for line in return_logs:
                 self.append_log("  " + line)
+            for line in tick_turn_cooldowns(self.players, self.active):
+                self.append_log("  " + line)
             self.after(TURN_DELAY_MS, self.after_resolve)
             return
         card, target_idx, reason = choice
-        player.last_card_id = card.id
+        mark_card_played(player, card)
         self.append_log(f"Bot plan: {reason}")
         self.append_log(f"Bot plays {card.name}")
         self.append_log(
@@ -1215,25 +1410,56 @@ class CrashOutApp(tk.Tk):
 
     def show_game_over(self, winner: str | None) -> None:
         self.clear()
-        ttk.Label(self.container, text="Game Over", style="Title.TLabel").pack(
-            anchor="w"
-        )
-        msg = f"{winner} wins!" if winner else "No one left standing."
-        ttk.Label(self.container, text=msg, style="Body.TLabel").pack(
-            anchor="w", pady=12
-        )
+        vs_bot = self.settings is not None and self.settings.vs_bot
+        human_won = vs_bot and winner is not None and winner != BOT_NAME
+        if vs_bot:
+            bg = WIN_BG if human_won else LOSE_BG
+            fg = "#e8f8ee" if human_won else "#ffe8e0"
+        else:
+            bg = SCREEN_BG
+            fg = "#f2e9d8"
+        self._set_screen_bg(bg)
+        center = tk.Frame(self.container, bg=bg)
+        center.pack(expand=True)
+        title = "-=You Win=-" if human_won else "-=Game Over=-"
+        tk.Label(
+            center,
+            text=title,
+            bg=bg,
+            fg=fg,
+            font=(UI_FONT_FAMILY, 64),
+        ).pack(pady=(0, 20))
+        if not human_won:
+            msg = f"{winner} wins!" if winner else "No one left standing."
+            tk.Label(
+                center,
+                text=msg,
+                bg=bg,
+                fg=fg,
+                font=(UI_FONT_FAMILY, 24),
+                justify="center",
+            ).pack(pady=20)
         for p in self.players:
             status = "OUT" if not p.alive else f"{p.hp}/{p.max_hp} HP"
-            ttk.Label(
-                self.container, text=f"{p.name}: {status}", style="Body.TLabel"
-            ).pack(anchor="w")
+            tk.Label(
+                center,
+                text=f"{p.name}: {status}",
+                bg=bg,
+                fg=fg,
+                font=(UI_FONT_FAMILY, 24),
+            ).pack(pady=4)
         ttk.Button(
-            self.container,
+            center,
             text="Play again",
-            style="Accent.TButton",
+            style="Setup.TButton",
             command=self.show_setup,
-        ).pack(anchor="w", pady=16)
-        ttk.Button(self.container, text="Quit", command=self.destroy).pack(anchor="w")
+        ).pack(pady=(20, 8))
+        ttk.Button(
+            center,
+            text="Quit",
+            style="Setup.TButton",
+            command=self.destroy,
+        ).pack()
 
 
 def main() -> None:

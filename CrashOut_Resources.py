@@ -16,6 +16,7 @@ FIFTH_CARD_HEAL = 25
 STEAL_PP_COST = 25
 HEAVY_HIT_MULTIPLIER = 1.5
 COOLDOWN_CLEAR_TURNS = 2
+HEAVY_HIT_COOLDOWN_TURNS = 2
 BORROW_TURNS = 2  # return after thief ends this many turns (steal turn + 1 more)
 BOT_NAME = "bot"
 HP_MIN, HP_MAX = 1, 9999
@@ -34,6 +35,7 @@ class Card:
     steals: bool = False
     heavy_hit: bool = False
     borrowed_from: int | None = None
+    cooldown_remaining: int = 0
 
     @property
     def effect(self) -> str:
@@ -44,7 +46,11 @@ class Card:
         if self.steals:
             return base + " / steal 1 opponent card for 1 turn"
         if self.heavy_hit:
-            return base + f" / clears target cooldowns for {COOLDOWN_CLEAR_TURNS} turns"
+            return (
+                base
+                + f" / {HEAVY_HIT_COOLDOWN_TURNS}-turn cooldown"
+                + f" / clears target cooldowns for {COOLDOWN_CLEAR_TURNS} turns"
+            )
         return base
 
     def label(self) -> str:
@@ -88,7 +94,7 @@ class Card:
             steal_line = "steal 1 card"
             extra = f"{extra} / {steal_line}" if extra else steal_line
         elif self.heavy_hit:
-            heavy_line = "clear cd 2t"
+            heavy_line = f"{HEAVY_HIT_COOLDOWN_TURNS}t cd / clear cd {COOLDOWN_CLEAR_TURNS}t"
             extra = f"{extra} / {heavy_line}" if extra else heavy_line
         return primary, extra
 
@@ -119,13 +125,38 @@ class Player:
         return self.name == BOT_NAME
 
     def playable_cards(self) -> list[Card]:
-        if self.cooldown_clear_turns > 0:
-            return list(self.hand)
-        return [c for c in self.hand if c.id != self.last_card_id]
+        return [c for c in self.hand if not card_is_cooling(self, c)]
+
+
+def cooldown_turns_for(card: Card) -> int:
+    return HEAVY_HIT_COOLDOWN_TURNS if card.heavy_hit else 1
+
+
+def mark_card_played(player: Player, card: Card) -> None:
+    """Start this card's cooldown. Tick at end of turn consumes 1 immediately."""
+    player.last_card_id = card.id
+    turns = cooldown_turns_for(card)
+    for held in player.hand:
+        if held.id == card.id:
+            held.cooldown_remaining = turns + 1
+            break
+
+
+def _cooldown_remaining(player: Player, card: Card) -> int:
+    for held in player.hand:
+        if held.id == card.id:
+            return held.cooldown_remaining
+    return 0
 
 
 def card_is_cooling(player: Player, card: Card) -> bool:
-    return player.cooldown_clear_turns <= 0 and card.id == player.last_card_id
+    remaining = _cooldown_remaining(player, card)
+    if remaining <= 0:
+        return False
+    # Cooldown-clear relief bypasses the 1-turn lock, but not Heavy Hit's own 2-turn lock.
+    if player.cooldown_clear_turns > 0 and not card.heavy_hit:
+        return False
+    return True
 
 
 @dataclass
@@ -451,7 +482,11 @@ def resolve_card(
         if damage > 0:
             logs.append(f"(Its {damage} damage is ignored on self.)")
         if card.heavy_hit:
-            logs.extend(apply_heavy_hit_cooldown_effect(target))
+            keep_id = card.id if target_idx == active else None
+            logs.extend(apply_heavy_hit_cooldown_effect(target, keep_card_id=keep_id))
+            logs.append(
+                f"{card.name} is on cooldown for {HEAVY_HIT_COOLDOWN_TURNS} turns."
+            )
         return logs
 
     if damage > 0:
@@ -463,13 +498,25 @@ def resolve_card(
     elif damage > 0:
         logs.append("(This card has 0 heal — caster gains nothing.)")
     if card.heavy_hit:
-        logs.extend(apply_heavy_hit_cooldown_effect(target))
+        keep_id = card.id if target_idx == active else None
+        logs.extend(apply_heavy_hit_cooldown_effect(target, keep_card_id=keep_id))
+        logs.append(
+            f"{card.name} is on cooldown for {HEAVY_HIT_COOLDOWN_TURNS} turns."
+        )
     return logs
 
 
-def apply_heavy_hit_cooldown_effect(target: Player) -> list[str]:
+def apply_heavy_hit_cooldown_effect(
+    target: Player,
+    *,
+    keep_card_id: int | None = None,
+) -> list[str]:
     target.last_card_id = None
     target.cooldown_clear_turns = COOLDOWN_CLEAR_TURNS
+    for held in target.hand:
+        if keep_card_id is not None and held.id == keep_card_id:
+            continue
+        held.cooldown_remaining = 0
     return [
         f"{target.name}'s cooldowns are cleared for {COOLDOWN_CLEAR_TURNS} turns "
         "(Heavy Hit)."
@@ -484,6 +531,12 @@ def tick_turn_cooldowns(players: list[Player], ending_idx: int) -> list[str]:
         if player.cooldown_clear_turns <= 0:
             player.cooldown_clear_turns = 0
             logs.append(f"{player.name}'s Heavy Hit cooldown relief ended.")
+    for held in player.hand:
+        if held.cooldown_remaining <= 0:
+            continue
+        held.cooldown_remaining -= 1
+        if held.cooldown_remaining <= 0 and held.heavy_hit:
+            logs.append(f"{player.name}'s Heavy Hit is ready.")
     return logs
 
 
@@ -665,6 +718,6 @@ def describe_target(
         return who + " (damage them + heal you + steal 1 card)"
     if card.heavy_hit:
         if target_idx == active:
-            return who + " (self — +50% heal, clears your cooldowns 2 turns)"
-        return who + " (damage them + heal you +50%, clears their cooldowns 2 turns)"
+            return who + " (self — +50% heal, 2-turn cooldown, clears your cooldowns 2 turns)"
+        return who + " (damage them + heal you +50%, 2-turn cooldown, clears their cooldowns 2 turns)"
     return who + " (damage them + heal you)"

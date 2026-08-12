@@ -35,6 +35,7 @@ from CrashOut_Resources import (
     make_mercy_card,
     make_players_from_mixed_decks,
     make_solo_players,
+    mark_card_played,
     next_alive_index,
     resolve_card,
     resolve_steal,
@@ -141,8 +142,8 @@ def create_card(
     heavy_hit = False
     if not steals and can_add_heavy_hit_card(existing):
         heavy_hit = prompt_yes_no(
-            "Add Heavy Hit? (+50% damage/heal, clears target cooldowns for 2 turns; "
-            "one per deck.)"
+            "Add Heavy Hit? (+50% damage/heal, 2-turn cooldown, clears target "
+            "cooldowns for 2 turns; one per deck.)"
         )
     budget = stat_budget(power_points, steals)
     while True:
@@ -156,7 +157,7 @@ def create_card(
         elif heavy_hit:
             print(
                 f"Spend {power_points} power points on damage/heal. "
-                "Heavy Hit: +50% power, clears target cooldowns for 2 turns."
+                "Heavy Hit: +50% power, 2-turn cooldown, clears target cooldowns for 2 turns."
             )
         else:
             print(f"Spend exactly {power_points} power points.")
@@ -188,7 +189,7 @@ def create_card(
         if card.steals:
             print("  -> Steal: takes 1 opponent card for 1 turn")
         if card.heavy_hit:
-            print("  -> Heavy Hit: +50% power, clears target cooldowns for 2 turns")
+            print("  -> Heavy Hit: +50% power, 2-turn cooldown, clears target cooldowns for 2 turns")
         print()
         print_card(card)
         print()
@@ -409,7 +410,7 @@ def play_turn(
                 print(f"  -> {line}")
             return borrows
         card, target_idx, reason = choice
-        player.last_card_id = card.id
+        mark_card_played(player, card)
         print(f"Bot plan: {reason}\n")
         announce_play(player, card)
         print(f"Targeted: {describe_target(card, players, active, target_idx)}")
@@ -439,7 +440,7 @@ def play_turn(
             print(f"  '{card.name}' is cooling down — pick a different card.")
             continue
         break
-    player.last_card_id = card.id
+    mark_card_played(player, card)
     announce_play(player, card)
 
     target_idx = choose_target(players, active, card)
