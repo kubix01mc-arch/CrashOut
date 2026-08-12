@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-import ctypes
-import os
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
@@ -56,6 +54,11 @@ from CrashOut_Resources import (
     stat_budget,
     tick_turn_cooldowns,
 )
+from crash_out_themes import (
+    active_theme,
+    randomize_theme,
+    reset_theme,
+)
 
 # Playing-card style buttons: width:height = 5:7
 CARD_ASPECT = 7 / 5
@@ -64,44 +67,18 @@ CARD_MAX_W = 200
 CARD_GAP_MIN = 6
 TARGET_MIN = 100
 TARGET_MAX = 200
-SCREEN_BG = "#1a1f1c"
-WIN_BG = "#1f5a32"
-LOSE_BG = "#6b1f1f"
 LOG_PANEL_WIDTH = 300
 PREVIEW_CARD_W = 168
 DECK_MINI_W = 110
 BOT_ICON_PATH = Path(__file__).resolve().parent / "assets" / "bot_icon.png"
-# Packaged as arial.ttf; the font's real family name is "Minecraft".
-ARIAL_FONT_PATH = (
-    Path(__file__).resolve().parent
-    / "Minecraft-20230518T220806Z-001 (1)"
-    / "Minecraft"
-    / "arial.ttf"
-)
-UI_FONT_FAMILY = "Minecraft"
-LOG_FONT_FAMILY = "Minecraft"
-FR_PRIVATE = 0x10
-HWND_BROADCAST = 0xFFFF
-WM_FONTCHANGE = 0x001D
 
 
-def _register_font_file(font_path: Path) -> None:
-    """Register a .ttf/.otf for the current process (Windows)."""
-    if not font_path.exists() or not hasattr(ctypes, "windll"):
-        return
-    add_ex = getattr(ctypes.windll.gdi32, "AddFontResourceExW", None)
-    if add_ex is None:
-        return
-    try:
-        add_ex(str(font_path), FR_PRIVATE, None)
-        ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_FONTCHANGE, 0, 0)
-    except Exception:
-        pass
+def _theme():
+    return active_theme()
 
 
-def _ensure_minecraft_fonts_loaded() -> None:
-    """Load arial.ttf from the extracted Minecraft fonts folder."""
-    _register_font_file(ARIAL_FONT_PATH)
+def _font_family() -> str:
+    return _theme().font_family
 
 
 def card_size_for_area(
@@ -218,6 +195,174 @@ def _draw_pixel_panel(
         )
 
 
+def _draw_neon_card(
+    canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, fill: str, accent: str, scale: int
+) -> None:
+    s = max(2, scale)
+    canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline="")
+    for inset, color in ((0, accent), (s, _shift_hex(accent, 40)), (2 * s, _shift_hex(accent, -35))):
+        canvas.create_rectangle(
+            x1 + inset, y1 + inset, x2 - inset, y2 - inset, outline=color, width=s
+        )
+    arm = 5 * s
+    for px, py, dx, dy in (
+        (x1 + s, y1 + s, 1, 1),
+        (x2 - s, y1 + s, -1, 1),
+        (x1 + s, y2 - s, 1, -1),
+        (x2 - s, y2 - s, -1, -1),
+    ):
+        canvas.create_line(px, py, px + dx * arm, py, fill=accent, width=s)
+        canvas.create_line(px, py, px, py + dy * arm, fill=accent, width=s)
+
+
+def _draw_stone_card(
+    canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, fill: str, accent: str, scale: int
+) -> None:
+    s = max(2, scale)
+    canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=_shift_hex(accent, -40), width=s)
+    row_h = max(3, 3 * s)
+    row = 0
+    y = y1 + s
+    while y < y2 - s:
+        offset = (row % 2) * (4 * s)
+        x = x1 + s + offset
+        while x < x2 - s:
+            bw = min(7 * s, x2 - s - x)
+            bh = min(row_h - s, y2 - s - y)
+            brick = _shift_hex(fill, 10 if row % 2 else -10)
+            canvas.create_rectangle(x, y, x + bw, y + bh, fill=brick, outline=_shift_hex(accent, -55))
+            x += 8 * s
+        y += row_h
+        row += 1
+
+
+def _draw_ice_card(
+    canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, fill: str, accent: str, scale: int
+) -> None:
+    s = max(2, scale)
+    canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=accent, width=s)
+    frost = _shift_hex(accent, 50)
+    step = max(2, 3 * s)
+    d = y2 - y1
+    i = x1 - d
+    while i < x2 + d:
+        canvas.create_line(i, y1 + s, i + d, y2 - s, fill=frost, width=max(1, s // 2))
+        i += step
+    canvas.create_rectangle(x1 + s, y1 + s, x2 - s, y1 + 2 * s, fill="#ffffff", outline="")
+
+
+def _draw_lava_card(
+    canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, fill: str, accent: str, scale: int
+) -> None:
+    s = max(2, scale)
+    canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=_shift_hex(accent, -30), width=s)
+    w, h = x2 - x1, y2 - y1
+    cracks = (
+        (x1 + 3 * s, y1 + 4 * s, x1 + w // 2, y1 + h // 3),
+        (x1 + w // 2, y1 + h // 3, x2 - 4 * s, y2 - 5 * s),
+        (x1 + 5 * s, y2 - 6 * s, x2 - 6 * s, y1 + h // 2),
+        (x1 + w // 3, y1 + 6 * s, x1 + 2 * w // 3, y2 - 4 * s),
+    )
+    for x_a, y_a, x_b, y_b in cracks:
+        canvas.create_line(x_a, y_a, x_b, y_b, fill=accent, width=max(1, s))
+        canvas.create_line(x_a + s, y_a, x_b + s, y_b, fill=_shift_hex(accent, 35), width=max(1, s // 2))
+
+
+def _draw_arcade_card(
+    canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, fill: str, accent: str, scale: int
+) -> None:
+    s = max(2, scale)
+    stripe = 2 * s
+    row = 0
+    y = y1
+    while y < y2:
+        color = _shift_hex(fill, 14 if row % 2 else -14)
+        canvas.create_rectangle(x1, y, x2, min(y + stripe, y2), fill=color, outline="")
+        y += stripe
+        row += 1
+    canvas.create_rectangle(x1, y1, x2, y2, outline=accent, width=2 * s)
+    dot = 2 * s
+    for px, py in ((x1 + dot, y1 + dot), (x2 - dot, y1 + dot), (x1 + dot, y2 - dot), (x2 - dot, y2 - dot)):
+        canvas.create_rectangle(px - dot, py - dot, px + dot, py + dot, fill=accent, outline="")
+
+
+def _draw_gold_card(
+    canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, fill: str, accent: str, scale: int
+) -> None:
+    s = max(2, scale)
+    canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=accent, width=2 * s)
+    inset = 2 * s
+    canvas.create_rectangle(
+        x1 + inset, y1 + inset, x2 - inset, y2 - inset,
+        outline=_shift_hex(accent, 25), width=s,
+    )
+    gem = 2 * s
+    for px, py in ((x1 + 3 * s, y1 + 3 * s), (x2 - 3 * s, y1 + 3 * s), (x1 + 3 * s, y2 - 3 * s), (x2 - 3 * s, y2 - 3 * s)):
+        canvas.create_rectangle(px - gem, py - gem, px + gem, py + gem, fill=accent, outline=_shift_hex(accent, 40))
+
+
+def _draw_circuit_card(
+    canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, fill: str, accent: str, scale: int
+) -> None:
+    s = max(2, scale)
+    canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline=accent, width=s)
+    step = max(3, 4 * s)
+    dot = max(1, s)
+    gx = x1 + 2 * s
+    while gx < x2 - 2 * s:
+        gy = y1 + 2 * s
+        while gy < y2 - 2 * s:
+            canvas.create_rectangle(gx, gy, gx + dot, gy + dot, fill=_shift_hex(accent, -15), outline="")
+            gy += step
+        gx += step
+    mid = (y1 + y2) // 2
+    canvas.create_line(x1 + 4 * s, mid, x2 - 4 * s, mid, fill=accent, width=s)
+    canvas.create_line((x1 + x2) // 2, y1 + 4 * s, (x1 + x2) // 2, y2 - 4 * s, fill=accent, width=s)
+
+
+def _draw_shadow_card(
+    canvas: tk.Canvas, x1: int, y1: int, x2: int, y2: int, fill: str, accent: str, scale: int
+) -> None:
+    s = max(2, scale)
+    canvas.create_rectangle(x1, y1, x2, y2, fill=fill, outline="")
+    inset = 2 * s
+    canvas.create_rectangle(
+        x1 + inset, y1 + inset, x2 - inset, y2 - inset, outline=accent, width=s
+    )
+    canvas.create_line(
+        x1 + inset, y1 + inset + 3 * s, x2 - inset, y1 + inset + 3 * s,
+        fill=_shift_hex(accent, -35), width=s,
+    )
+
+
+_CARD_FRAME_DRAWERS = {
+    "pixel": _draw_pixel_panel,
+    "neon": _draw_neon_card,
+    "stone": _draw_stone_card,
+    "ice": _draw_ice_card,
+    "lava": _draw_lava_card,
+    "arcade": _draw_arcade_card,
+    "gold": _draw_gold_card,
+    "circuit": _draw_circuit_card,
+    "shadow": _draw_shadow_card,
+}
+
+
+def _draw_card_frame(
+    canvas: tk.Canvas,
+    x1: int,
+    y1: int,
+    x2: int,
+    y2: int,
+    fill: str,
+    accent: str,
+    scale: int,
+) -> None:
+    style = _theme().card_style
+    drawer = _CARD_FRAME_DRAWERS.get(style, _draw_pixel_panel)
+    drawer(canvas, x1, y1, x2, y2, fill, accent, scale)
+
+
 class RoundedCardButton(tk.Canvas):
     """Clickable pixel-art card face (5:7 aspect ratio)."""
 
@@ -237,7 +382,7 @@ class RoundedCardButton(tk.Canvas):
             parent,
             width=width,
             height=height,
-            bg="#1a1f1c",
+            bg=_theme().screen_bg,
             highlightthickness=0,
             bd=0,
             cursor="arrow" if disabled or command is None else "hand2",
@@ -274,24 +419,25 @@ class RoundedCardButton(tk.Canvas):
 
     def _font(self, ratio: float, minimum: int = 8) -> tuple[str, int, str]:
         size = _mc_font_size(max(minimum, int(min(self._width, self._height) * ratio)))
-        return (UI_FONT_FAMILY, size, "bold")
+        return (_font_family(), size, "bold")
 
     def _font_regular(self, ratio: float, minimum: int = 8) -> tuple[str, int]:
         size = _mc_font_size(max(minimum, int(min(self._width, self._height) * ratio)))
-        return (UI_FONT_FAMILY, size)
+        return (_font_family(), size)
 
     def _fill_colors(self) -> tuple[str, str, str]:
+        art = _theme().cards
         if self.disabled:
-            return "#2a302c", "#6a736c", "#8a948c"
+            return art.disabled
         if self.selected:
-            return "#3d5a45", "#f0c674", "#fff6d8"
+            return art.selected
         if self.card.heal_any:
-            return "#1e3d2a", "#6ecf8a", "#d8ffe6"
+            return art.heal
         if self.card.heavy_hit:
-            return "#4a241c", "#e07a5f", "#ffe4d8"
+            return art.heavy_hit
         if self.card.steals:
-            return "#2e2240", "#c9a0dc", "#f3e6ff"
-        return "#3a3228", "#d4b483", "#f7edd8"
+            return art.steal
+        return art.normal
 
     def _draw(self, hover: bool = False) -> None:
         self.delete("all")
@@ -302,22 +448,29 @@ class RoundedCardButton(tk.Canvas):
         pad = scale
         x1, y1 = pad, pad
         x2, y2 = self._width - pad, self._height - pad
-        _draw_pixel_panel(self, x1, y1, x2, y2, fill, accent, scale)
+        _draw_card_frame(self, x1, y1, x2, y2, fill, accent, scale)
 
         cx = self._width // 2
         title_y = y1 + 7 * scale
         stats_y = int(self._height * 0.54)
         detail_y = y2 - 6 * scale
-        divider_y1 = int(self._height * 0.30)
-        divider_y2 = int(self._height * 0.76)
+        style = _theme().card_style
         div_x1 = x1 + 5 * scale
         div_x2 = x2 - 5 * scale
-        self.create_rectangle(
-            div_x1, divider_y1, div_x2, divider_y1 + scale, fill=accent, outline="", width=0
-        )
-        self.create_rectangle(
-            div_x1, divider_y2, div_x2, divider_y2 + scale, fill=accent, outline="", width=0
-        )
+        if style not in ("shadow", "circuit"):
+            divider_y1 = int(self._height * 0.30)
+            divider_y2 = int(self._height * 0.76)
+            self.create_rectangle(
+                div_x1, divider_y1, div_x2, divider_y1 + scale, fill=accent, outline="", width=0
+            )
+            self.create_rectangle(
+                div_x1, divider_y2, div_x2, divider_y2 + scale, fill=accent, outline="", width=0
+            )
+        elif style == "circuit":
+            self.create_rectangle(
+                div_x1, y1 + 5 * scale, div_x2, y1 + 5 * scale + max(1, scale // 2),
+                fill=accent, outline="", width=0,
+            )
 
         self.create_text(
             cx,
@@ -385,7 +538,7 @@ class RoundedTargetButton(tk.Canvas):
             parent,
             width=width,
             height=height,
-            bg="#222824",
+            bg=_theme().target_bg,
             highlightthickness=0,
             bd=0,
             cursor="hand2",
@@ -418,12 +571,13 @@ class RoundedTargetButton(tk.Canvas):
         self._draw(self._hover)
 
     def _colors(self, hover: bool) -> tuple[str, str, str]:
+        theme = _theme()
         if self.is_self:
-            fill = "#3d5a45" if not hover else "#4a6b52"
-            accent, text = "#f0c674", "#f7f0e0"
+            fill, accent, text = theme.target_self
         else:
-            fill = "#2c3330" if not hover else "#3a4540"
-            accent, text = "#c4b59a", "#f2e9d8"
+            fill, accent, text = theme.target_other
+        if hover:
+            fill = _shift_hex(fill, 22)
         return fill, accent, text
 
     def _draw_badge(self, cx: int, cy: int, accent: str, text_color: str) -> None:
@@ -441,7 +595,7 @@ class RoundedTargetButton(tk.Canvas):
             cy,
             text=number,
             fill=accent,
-            font=(UI_FONT_FAMILY, _mc_font_size(max(16, self._size // 3)), "bold"),
+            font=(_font_family(), _mc_font_size(max(16, self._size // 3)), "bold"),
             justify="center",
         )
 
@@ -451,7 +605,7 @@ class RoundedTargetButton(tk.Canvas):
         s = self._size
         scale = _pixel_scale(s)
         pad = scale
-        _draw_pixel_panel(self, pad, pad, s - pad, s - pad, fill, accent, scale)
+        _draw_card_frame(self, pad, pad, s - pad, s - pad, fill, accent, scale)
         cx = s // 2
         self._draw_badge(cx, int(s * 0.34), accent, text_color)
         self.create_text(
@@ -459,7 +613,7 @@ class RoundedTargetButton(tk.Canvas):
             int(s * 0.62),
             text=f"{self.player.hp}/{self.player.max_hp}",
             fill=accent,
-            font=(UI_FONT_FAMILY, _mc_font_size(max(8, s // 9)), "bold"),
+            font=(_font_family(), _mc_font_size(max(8, s // 9)), "bold"),
             justify="center",
         )
         self.create_text(
@@ -467,7 +621,7 @@ class RoundedTargetButton(tk.Canvas):
             int(s * 0.82),
             text=self.subtitle,
             fill=text_color,
-            font=(UI_FONT_FAMILY, _mc_font_size(max(8, s // 14))),
+            font=(_font_family(), _mc_font_size(max(8, s // 14))),
             width=s - pad * 6,
             justify="center",
         )
@@ -487,6 +641,91 @@ class RoundedTargetButton(tk.Canvas):
 
 HUD_CHIP_W = 152
 HUD_CHIP_H = 72
+ART_BTN_W = 200
+ART_BTN_H = 52
+
+
+class ThemedArtButton(tk.Canvas):
+    """Action button drawn with the active theme's card-frame art."""
+
+    def __init__(
+        self,
+        parent: tk.Misc,
+        text: str,
+        *,
+        command=None,
+        width: int = ART_BTN_W,
+        height: int = ART_BTN_H,
+        palette: str = "normal",
+        bg: str | None = None,
+    ) -> None:
+        super().__init__(
+            parent,
+            width=width,
+            height=height,
+            bg=bg if bg is not None else _theme().screen_bg,
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self._label = text
+        self.command = command
+        self._palette = palette
+        self._hover = False
+        self._width = width
+        self._height = height
+        self._draw()
+        self.bind("<Button-1>", self._on_click)
+        self.bind("<Enter>", self._on_enter)
+        self.bind("<Leave>", self._on_leave)
+
+    def _colors(self, hover: bool) -> tuple[str, str, str]:
+        art = _theme().cards
+        mapping = {
+            "normal": art.normal,
+            "heal": art.heal,
+            "heavy_hit": art.heavy_hit,
+            "steal": art.steal,
+            "selected": art.selected,
+            "disabled": art.disabled,
+        }
+        fill, accent, text = mapping.get(self._palette, art.normal)
+        if hover:
+            fill = _shift_hex(fill, 22)
+        return fill, accent, text
+
+    def _draw(self, hover: bool = False) -> None:
+        self.delete("all")
+        fill, accent, text_color = self._colors(hover)
+        scale = _pixel_scale(min(self._width, self._height * 2))
+        pad = scale
+        x1, y1 = pad, pad
+        x2, y2 = self._width - pad, self._height - pad
+        _draw_card_frame(self, x1, y1, x2, y2, fill, accent, scale)
+        self.create_text(
+            self._width // 2,
+            self._height // 2,
+            text=self._label.upper(),
+            fill=text_color,
+            font=(
+                _font_family(),
+                _mc_font_size(max(10, self._height // 3)),
+                "bold",
+            ),
+            justify="center",
+        )
+
+    def _on_click(self, _event=None) -> None:
+        if self.command:
+            self.command()
+
+    def _on_enter(self, _event=None) -> None:
+        self._hover = True
+        self._draw(hover=True)
+
+    def _on_leave(self, _event=None) -> None:
+        self._hover = False
+        self._draw(hover=False)
 
 
 class PixelHudChip(tk.Canvas):
@@ -503,7 +742,7 @@ class PixelHudChip(tk.Canvas):
             parent,
             width=HUD_CHIP_W,
             height=HUD_CHIP_H,
-            bg="#1a1f1c",
+            bg=_theme().screen_bg,
             highlightthickness=0,
             bd=0,
         )
@@ -513,12 +752,13 @@ class PixelHudChip(tk.Canvas):
 
     def _draw(self) -> None:
         self.delete("all")
+        theme = _theme()
         if not self.player.alive:
-            fill, accent, text_color = "#2a302c", "#6a736c", "#8a948c"
+            fill, accent, text_color = theme.hud_dead
         elif self.is_active:
-            fill, accent, text_color = "#3d5a45", "#f0c674", "#fff6d8"
+            fill, accent, text_color = theme.hud_active
         else:
-            fill, accent, text_color = "#2c3330", "#8a948c", "#c4b59a"
+            fill, accent, text_color = theme.hud_idle
         scale = 3
         _draw_pixel_panel(self, 0, 0, HUD_CHIP_W, HUD_CHIP_H, fill, accent, scale)
         cx = HUD_CHIP_W // 2
@@ -528,7 +768,7 @@ class PixelHudChip(tk.Canvas):
             22,
             text=name,
             fill=accent if self.is_active else text_color,
-            font=(UI_FONT_FAMILY, 8, "bold" if self.is_active else "normal"),
+            font=(_font_family(), 8, "bold" if self.is_active else "normal"),
             justify="center",
         )
         hp_text = f"{self.player.hp}/{self.player.max_hp} HP" if self.player.alive else "OUT"
@@ -537,19 +777,21 @@ class PixelHudChip(tk.Canvas):
             48,
             text=hp_text,
             fill=accent if self.player.alive else text_color,
-            font=(UI_FONT_FAMILY, 16, "bold"),
+            font=(_font_family(), 16, "bold"),
             justify="center",
         )
 
 
 class CrashOutApp(tk.Tk):
     def __init__(self) -> None:
-        _ensure_minecraft_fonts_loaded()
+        reset_theme()
         super().__init__()
         self.title("Crash Out")
         self.geometry("920x700")
         self.minsize(480, 400)
-        self.configure(bg="#1a1f1c")
+        self._screen = "setup"
+        self._play_banner = ""
+        self._game_over_winner: str | None = None
         self._fullscreen = False
         self.bind("<F11>", self._toggle_fullscreen)
 
@@ -569,7 +811,7 @@ class CrashOutApp(tk.Tk):
         self.log: tk.Text | None = None
         self._card_faces: list[RoundedCardButton] = []
         self._hand_outer: tk.Frame | None = None
-        self._overlay_host = tk.Frame(self, bg="#1a1f1c")
+        self._overlay_host = tk.Frame(self, bg=_theme().screen_bg)
         self._target_overlay: tk.Canvas | None = None
         self._craft_scale: ttk.Scale | None = None
         self._target_row: tk.Frame | None = None
@@ -578,77 +820,132 @@ class CrashOutApp(tk.Tk):
         self.preview: RoundedCardButton | None = None
         self.preview_status: ttk.Label | None = None
         self.save_btn: ttk.Button | None = None
+        self._theme_label: ttk.Label | None = None
 
         self.style = ttk.Style(self)
         try:
             self.style.theme_use("clam")
         except tk.TclError:
             pass
+        self._apply_theme_styles()
+
+        self.container = tk.Frame(self, bg=_theme().screen_bg)
+        self.container.pack(fill="both", expand=True, padx=16, pady=16)
+        self.show_setup()
+
+    def _apply_theme_styles(self) -> None:
+        theme = _theme()
+        self.configure(bg=theme.screen_bg)
+        if hasattr(self, "container"):
+            self.container.configure(bg=theme.screen_bg)
+        if hasattr(self, "_overlay_host"):
+            self._overlay_host.configure(bg=theme.screen_bg)
         self.style.configure(
             "Title.TLabel",
-            font=(UI_FONT_FAMILY, 22, "bold"),
-            foreground="#f2e9d8",
-            background="#1a1f1c",
+            font=(_font_family(), 22, "bold"),
+            foreground=theme.title_fg,
+            background=theme.screen_bg,
         )
         self.style.configure(
             "Body.TLabel",
-            font=(UI_FONT_FAMILY, 11),
-            foreground="#d7d2c4",
-            background="#1a1f1c",
+            font=(_font_family(), 11),
+            foreground=theme.body_fg,
+            background=theme.screen_bg,
         )
         self.style.configure(
             "Log.TLabel",
-            font=(LOG_FONT_FAMILY, 10),
-            foreground="#c8e6c0",
-            background="#121612",
+            font=(_font_family(), 10),
+            foreground=theme.log_fg,
+            background=theme.log_bg,
         )
-        self.style.configure("Accent.TButton", font=(UI_FONT_FAMILY, 11, "bold"))
+        self.style.configure("Accent.TButton", font=(_font_family(), 11, "bold"))
         self.style.configure(
             "SetupTitle.TLabel",
-            font=(UI_FONT_FAMILY, 32, "bold"),
-            foreground="#f2e9d8",
-            background="#1a1f1c",
+            font=(_font_family(), 32, "bold"),
+            foreground=theme.title_fg,
+            background=theme.screen_bg,
         )
         self.style.configure(
             "SetupBody.TLabel",
-            font=(UI_FONT_FAMILY, 16),
-            foreground="#d7d2c4",
-            background="#1a1f1c",
+            font=(_font_family(), 16),
+            foreground=theme.body_fg,
+            background=theme.screen_bg,
         )
         self.style.configure(
             "Setup.TButton",
-            font=(UI_FONT_FAMILY, 16, "bold"),
+            font=(_font_family(), 16, "bold"),
             padding=(16, 8),
         )
         self.style.configure(
             "Setup.TCombobox",
-            font=(UI_FONT_FAMILY, 16),
+            font=(_font_family(), 16),
         )
         self.style.configure(
             "Setup.TEntry",
-            font=(UI_FONT_FAMILY, 16),
+            font=(_font_family(), 16),
         )
         self.style.configure(
             "Lab.TCheckbutton",
-            font=(UI_FONT_FAMILY, 16),
-            background="#1a1f1c",
-            foreground="#d7d2c4",
+            font=(_font_family(), 16),
+            background=theme.screen_bg,
+            foreground=theme.body_fg,
         )
         self.style.configure(
             "Green.Horizontal.TScale",
-            troughcolor="#243028",
-            background="#6ecf8a",
-            bordercolor="#4a9e62",
-            lightcolor="#8fd6a8",
-            darkcolor="#3d8b52",
+            troughcolor=theme.scale_trough,
+            background=theme.scale_fill,
+            bordercolor=theme.scale_border,
+            lightcolor=theme.scale_light,
+            darkcolor=theme.scale_dark,
         )
         self.style.map(
             "Green.Horizontal.TScale",
-            background=[("active", "#8fd6a8"), ("!disabled", "#6ecf8a")],
+            background=[("active", theme.scale_light), ("!disabled", theme.scale_fill)],
         )
 
-        self.container = tk.Frame(self, bg="#1a1f1c")
-        self.container.pack(fill="both", expand=True, padx=16, pady=16)
+    def _refresh_current_screen(self) -> None:
+        if self._screen == "setup":
+            self.show_setup()
+        elif self._screen == "craft":
+            self.show_craft()
+        elif self._screen == "play":
+            self.show_play(self._play_banner)
+        elif self._screen == "game_over":
+            self.show_game_over(self._game_over_winner)
+
+    def _on_random_theme(self) -> None:
+        theme = randomize_theme()
+        self._apply_theme_styles()
+        self._refresh_current_screen()
+        if self._theme_label is not None and self._theme_label.winfo_exists():
+            self._theme_label.configure(
+                text=f"Theme: {theme.name} ({theme.card_style}) — {theme.font_family}"
+            )
+
+    def _on_reset_theme(self) -> None:
+        theme = reset_theme()
+        self._apply_theme_styles()
+        self._refresh_current_screen()
+        if self._theme_label is not None and self._theme_label.winfo_exists():
+            self._theme_label.configure(text=f"Theme: {theme.name}")
+
+    def _reset_game(self) -> None:
+        """Clear match progress and return to setup; keep the active theme."""
+        self._busy = False
+        self.settings = None
+        self.players = []
+        self.crafted = []
+        self.all_player_decks = []
+        self.crafting_player = 1
+        self.craft_slot = 1
+        self.active = 0
+        self.pending_card = None
+        self.pending_target_idx = None
+        self.starting_hp = DEFAULT_STARTING_HP
+        self._borrows = []
+        self._game_log = []
+        self._play_banner = ""
+        self._game_over_winner = None
         self.show_setup()
 
     def _toggle_fullscreen(self, _event: tk.Event | None = None) -> str:
@@ -673,7 +970,7 @@ class CrashOutApp(tk.Tk):
         self.preview = None
         self.preview_status = None
         self.save_btn = None
-        self._set_screen_bg(SCREEN_BG)
+        self._set_screen_bg(_theme().screen_bg)
         for w in self.container.winfo_children():
             w.destroy()
 
@@ -753,7 +1050,7 @@ class CrashOutApp(tk.Tk):
             self._overlay_host,
             highlightthickness=0,
             bd=0,
-            bg="#1a1f1c",
+            bg=_theme().overlay_bg,
         )
         self._target_overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
         self._target_overlay.bind("<Configure>", self._draw_target_dim)
@@ -761,8 +1058,8 @@ class CrashOutApp(tk.Tk):
 
         panel = tk.Frame(
             self._overlay_host,
-            bg="#222824",
-            highlightbackground="#c4b59a",
+            bg=_theme().panel_bg,
+            highlightbackground=_theme().panel_border,
             highlightthickness=2,
             padx=20,
             pady=16,
@@ -772,12 +1069,12 @@ class CrashOutApp(tk.Tk):
         tk.Label(
             panel,
             text=f"Choose target for {card.name}",
-            fg="#f2e9d8",
-            bg="#222824",
-            font=(UI_FONT_FAMILY, 14, "bold"),
+            fg=_theme().title_fg,
+            bg=_theme().panel_bg,
+            font=(_font_family(), 14, "bold"),
         ).pack(pady=(0, 12))
 
-        self._target_row = tk.Frame(panel, bg="#222824", width=560, height=220)
+        self._target_row = tk.Frame(panel, bg=_theme().panel_bg, width=560, height=220)
         self._target_row.pack()
         self._target_row.pack_propagate(False)
         self._target_buttons = []
@@ -832,8 +1129,10 @@ class CrashOutApp(tk.Tk):
             face.place(x=start_x + i * (card_w + gap), y=y, width=card_w, height=card_h)
 
     def show_setup(self) -> None:
+        self._screen = "setup"
         self.clear()
-        center = tk.Frame(self.container, bg="#1a1f1c")
+        theme = _theme()
+        center = tk.Frame(self.container, bg=theme.screen_bg)
         center.pack(expand=True)
 
         ttk.Label(center, text="CRASH OUT", style="SetupTitle.TLabel").pack()
@@ -849,7 +1148,7 @@ class CrashOutApp(tk.Tk):
             justify="center",
         ).pack(pady=(12, 28))
 
-        form = tk.Frame(center, bg="#1a1f1c")
+        form = tk.Frame(center, bg=theme.screen_bg)
         form.pack()
 
         self.mode_var = tk.StringVar(value="1")
@@ -867,7 +1166,7 @@ class CrashOutApp(tk.Tk):
             ],
             state="readonly",
             width=18,
-            font=(UI_FONT_FAMILY, 16),
+            font=(_font_family(), 16),
             style="Setup.TCombobox",
         )
         modes.current(0)
@@ -881,7 +1180,7 @@ class CrashOutApp(tk.Tk):
             form,
             textvariable=self.hp_var,
             width=12,
-            font=(UI_FONT_FAMILY, 16),
+            font=(_font_family(), 16),
             style="Setup.TEntry",
         ).grid(row=1, column=1, sticky="w", padx=8)
 
@@ -893,7 +1192,7 @@ class CrashOutApp(tk.Tk):
             form,
             textvariable=self.pp_var,
             width=12,
-            font=(UI_FONT_FAMILY, 16),
+            font=(_font_family(), 16),
             style="Setup.TEntry",
         ).grid(row=2, column=1, sticky="w", padx=8)
 
@@ -910,6 +1209,27 @@ class CrashOutApp(tk.Tk):
             style="Setup.TButton",
             command=self.begin_card_lab,
         ).pack(pady=8)
+
+        theme_row = tk.Frame(center, bg=theme.screen_bg)
+        theme_row.pack(pady=(16, 4))
+        ttk.Button(
+            theme_row,
+            text="Creative Theme",
+            style="Setup.TButton",
+            command=self._on_random_theme,
+        ).pack(side="left", padx=6)
+        ttk.Button(
+            theme_row,
+            text="Default Theme",
+            style="Setup.TButton",
+            command=self._on_reset_theme,
+        ).pack(side="left", padx=6)
+        self._theme_label = ttk.Label(
+            center,
+            text=f"Theme: {theme.name} ({theme.card_style}) — {theme.font_family}",
+            style="SetupBody.TLabel",
+        )
+        self._theme_label.pack(pady=(8, 0))
 
     def begin_card_lab(self) -> None:
         try:
@@ -938,6 +1258,7 @@ class CrashOutApp(tk.Tk):
         self.show_craft()
 
     def show_craft(self) -> None:
+        self._screen = "craft"
         assert self.settings is not None
         self.clear()
         if self.craft_slot >= DECK_SIZE:
@@ -964,13 +1285,21 @@ class CrashOutApp(tk.Tk):
                 f"(damage + heal). Craftable cards are shuffled and re-dealt when "
                 f"everyone is done. Mercy and steal stay with their owner."
             )
-        lab = tk.Frame(self.container, bg="#1a1f1c")
+        lab = tk.Frame(self.container, bg=_theme().screen_bg)
         lab.pack(expand=True)
         ttk.Label(
             lab,
             text=lab_title,
             style="SetupTitle.TLabel",
         ).pack()
+        ThemedArtButton(
+            lab,
+            "Reset Game",
+            command=self._reset_game,
+            width=180,
+            height=44,
+            palette="heavy_hit",
+        ).pack(pady=(8, 4))
         steal_hint = (
             f" Optional: one steal card per deck ({STEAL_PP_COST} PP), "
             "or one Heavy Hit (+50% power, 2-turn cooldown, clears target cooldowns 2 turns)."
@@ -1033,7 +1362,7 @@ class CrashOutApp(tk.Tk):
 
         budget = stat_budget(pp, self.steal_var.get())
         self.damage_var = tk.IntVar(value=budget // 2 if budget else 0)
-        row = tk.Frame(lab, bg="#1a1f1c")
+        row = tk.Frame(lab, bg=_theme().screen_bg)
         row.pack(pady=8)
         ttk.Label(row, text="Damage points", style="SetupBody.TLabel").pack(side="left")
         self._craft_scale = ttk.Scale(
@@ -1047,7 +1376,7 @@ class CrashOutApp(tk.Tk):
         )
         self._craft_scale.pack(side="left", padx=12)
 
-        preview_row = tk.Frame(lab, bg="#1a1f1c")
+        preview_row = tk.Frame(lab, bg=_theme().screen_bg)
         preview_row.pack(pady=12)
         placeholder = Card(self.craft_slot, "Allrounder", 0, 0)
         self.preview = RoundedCardButton(
@@ -1075,7 +1404,7 @@ class CrashOutApp(tk.Tk):
             ttk.Label(lab, text="Deck so far:", style="SetupBody.TLabel").pack(
                 pady=(8, 4)
             )
-            deck_row = tk.Frame(lab, bg="#1a1f1c")
+            deck_row = tk.Frame(lab, bg=_theme().screen_bg)
             deck_row.pack()
             for c in self.crafted:
                 face = RoundedCardButton(deck_row, c, width=DECK_MINI_W)
@@ -1207,11 +1536,12 @@ class CrashOutApp(tk.Tk):
             self.append_log(entry)
 
     def _build_log_panel(self, parent: tk.Misc) -> None:
+        theme = _theme()
         panel = tk.Frame(
             parent,
-            bg="#121612",
+            bg=theme.log_bg,
             width=LOG_PANEL_WIDTH,
-            highlightbackground="#3a4540",
+            highlightbackground=_shift_hex(theme.screen_bg, 40),
             highlightthickness=1,
         )
         panel.pack(side="right", fill="y")
@@ -1220,23 +1550,25 @@ class CrashOutApp(tk.Tk):
         tk.Label(
             panel,
             text="Game Log",
-            fg="#c8e6c0",
-            bg="#121612",
-            font=(UI_FONT_FAMILY, 11, "bold"),
+            fg=theme.log_fg,
+            bg=theme.log_bg,
+            font=(_font_family(), 11, "bold"),
         ).pack(anchor="w", padx=12, pady=(12, 6))
 
-        log_frame = tk.Frame(panel, bg="#121612")
+        log_frame = tk.Frame(panel, bg=theme.log_bg)
         log_frame.pack(fill="both", expand=True, padx=8, pady=(0, 10))
 
-        scrollbar = tk.Scrollbar(log_frame, bg="#243028", troughcolor="#121612")
+        scrollbar = tk.Scrollbar(
+            log_frame, bg=theme.scale_trough, troughcolor=theme.log_bg
+        )
         scrollbar.pack(side="right", fill="y")
 
         self.log = tk.Text(
             log_frame,
-            bg="#121612",
-            fg="#c8e6c0",
-            insertbackground="#c8e6c0",
-            font=(LOG_FONT_FAMILY, 10),
+            bg=theme.log_bg,
+            fg=theme.log_fg,
+            insertbackground=theme.log_fg,
+            font=(_font_family(), 10),
             relief="flat",
             wrap="word",
             state="disabled",
@@ -1259,6 +1591,8 @@ class CrashOutApp(tk.Tk):
         self.log.configure(state="disabled")
 
     def show_play(self, banner_msg: str = "") -> None:
+        self._screen = "play"
+        self._play_banner = banner_msg
         self.clear()
         self._busy = False
         self.log = None
@@ -1267,18 +1601,18 @@ class CrashOutApp(tk.Tk):
             self._game_log.append("Play a card, then choose a target.")
         self._log_turn_banner(banner_msg or f"Turn — {player.name}")
 
-        hud_outer = tk.Frame(self.container, bg="#1a1f1c")
+        hud_outer = tk.Frame(self.container, bg=_theme().screen_bg)
         hud_outer.pack(fill="x", pady=(0, 10))
-        health_bar = tk.Frame(hud_outer, bg="#1a1f1c")
+        health_bar = tk.Frame(hud_outer, bg=_theme().screen_bg)
         health_bar.pack(anchor="center")
         for i, p in enumerate(self.players):
             chip = PixelHudChip(health_bar, p, is_active=(i == self.active))
             chip.pack(side="left", padx=6)
 
-        body = tk.Frame(self.container, bg="#1a1f1c")
+        body = tk.Frame(self.container, bg=_theme().screen_bg)
         body.pack(fill="both", expand=True)
 
-        play_area = tk.Frame(body, bg="#1a1f1c")
+        play_area = tk.Frame(body, bg=_theme().screen_bg)
         play_area.pack(side="left", fill="both", expand=True, padx=(0, 12))
 
         ttk.Label(play_area, text="CRASH OUT", style="Title.TLabel").pack()
@@ -1286,11 +1620,19 @@ class CrashOutApp(tk.Tk):
             play_area,
             text=banner_msg or f"Turn — {player.name}",
             style="Body.TLabel",
-        ).pack(pady=(4, 10))
+        ).pack(pady=(4, 6))
+        ThemedArtButton(
+            play_area,
+            "Reset Game",
+            command=self._reset_game,
+            width=180,
+            height=44,
+            palette="heavy_hit",
+        ).pack(pady=(0, 10))
 
         self._build_log_panel(body)
 
-        action = tk.Frame(play_area, bg="#1a1f1c")
+        action = tk.Frame(play_area, bg=_theme().screen_bg)
         action.pack(fill="both", expand=True)
 
         if not player.alive:
@@ -1305,7 +1647,7 @@ class CrashOutApp(tk.Tk):
             return
 
         ttk.Label(action, text="Your hand", style="Body.TLabel").pack()
-        self._hand_outer = tk.Frame(action, bg="#1a1f1c")
+        self._hand_outer = tk.Frame(action, bg=_theme().screen_bg)
         self._hand_outer.pack(fill="both", expand=True, pady=8)
         self._card_faces = []
         for card in player.hand:
@@ -1409,15 +1751,18 @@ class CrashOutApp(tk.Tk):
         self.show_play(f"Turn — {self.players[self.active].name}")
 
     def show_game_over(self, winner: str | None) -> None:
+        self._screen = "game_over"
+        self._game_over_winner = winner
         self.clear()
+        theme = _theme()
         vs_bot = self.settings is not None and self.settings.vs_bot
         human_won = vs_bot and winner is not None and winner != BOT_NAME
         if vs_bot:
-            bg = WIN_BG if human_won else LOSE_BG
+            bg = theme.win_bg if human_won else theme.lose_bg
             fg = "#e8f8ee" if human_won else "#ffe8e0"
         else:
-            bg = SCREEN_BG
-            fg = "#f2e9d8"
+            bg = theme.screen_bg
+            fg = theme.title_fg
         self._set_screen_bg(bg)
         center = tk.Frame(self.container, bg=bg)
         center.pack(expand=True)
@@ -1427,7 +1772,7 @@ class CrashOutApp(tk.Tk):
             text=title,
             bg=bg,
             fg=fg,
-            font=(UI_FONT_FAMILY, 64),
+            font=(_font_family(), 64),
         ).pack(pady=(0, 20))
         if not human_won:
             msg = f"{winner} wins!" if winner else "No one left standing."
@@ -1436,7 +1781,7 @@ class CrashOutApp(tk.Tk):
                 text=msg,
                 bg=bg,
                 fg=fg,
-                font=(UI_FONT_FAMILY, 24),
+                font=(_font_family(), 24),
                 justify="center",
             ).pack(pady=20)
         for p in self.players:
@@ -1446,20 +1791,28 @@ class CrashOutApp(tk.Tk):
                 text=f"{p.name}: {status}",
                 bg=bg,
                 fg=fg,
-                font=(UI_FONT_FAMILY, 24),
+                font=(_font_family(), 24),
             ).pack(pady=4)
-        ttk.Button(
-            center,
-            text="Play again",
-            style="Setup.TButton",
-            command=self.show_setup,
-        ).pack(pady=(20, 8))
-        ttk.Button(
-            center,
-            text="Quit",
-            style="Setup.TButton",
+        btn_row = tk.Frame(center, bg=bg)
+        btn_row.pack(pady=(24, 0))
+        ThemedArtButton(
+            btn_row,
+            "Reset Game",
+            command=self._reset_game,
+            width=200,
+            height=52,
+            palette="heavy_hit",
+            bg=bg,
+        ).pack(side="left", padx=8)
+        ThemedArtButton(
+            btn_row,
+            "Quit",
             command=self.destroy,
-        ).pack()
+            width=140,
+            height=52,
+            palette="normal",
+            bg=bg,
+        ).pack(side="left", padx=8)
 
 
 def main() -> None:
