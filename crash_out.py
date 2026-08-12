@@ -19,19 +19,28 @@ from CrashOut_Resources import (
     PLAYER_COUNT_MIN,
     PP_MAX,
     PP_MIN,
+    STEAL_PP_COST,
     TURN_DELAY_SEC,
+    ActiveBorrow,
     Card,
     Player,
     bot_choose_play,
+    card_is_cooling,
+    can_add_steal_card,
     check_winner,
     craft_card,
+    can_add_heavy_hit_card,
     describe_target,
     make_bot_deck,
     make_mercy_card,
-    make_players,
+    make_players_from_mixed_decks,
     make_solo_players,
     next_alive_index,
     resolve_card,
+    resolve_steal,
+    return_expired_borrows,
+    stat_budget,
+    tick_turn_cooldowns,
 )
 
 
@@ -83,6 +92,16 @@ def prompt_choice(msg: str, options: list[str]) -> int:
     return prompt_int("Choice", 1, len(options)) - 1
 
 
+def prompt_yes_no(msg: str) -> bool:
+    while True:
+        raw = input(f"{msg} (y/n): ").strip().lower()
+        if raw in ("y", "yes"):
+            return True
+        if raw in ("n", "no"):
+            return False
+        print("  Please enter y or n.")
+
+
 def banner(title: str) -> None:
     line = "=" * 52
     print(f"\n{line}\n  CRASH OUT — {title}\n{line}\n")
@@ -110,25 +129,71 @@ def create_card(
     slot: int,
     power_points: int,
     existing: list[Card],
+    *,
+    allow_steal: bool = True,
 ) -> Card:
-    clear()
-    banner(f"Create Card {slot}/{DECK_SIZE}")
-    print(f"Spend exactly {power_points} power points.")
-    print("Each point becomes either 1 damage or 1 heal.")
-    print("Damage hits the target; heal always returns to YOU.\n")
-    print("Name is chosen automatically from the split:")
-    print("  Sanctuary / Caretaker / Allrounder / Bruiser / Wrecker\n")
+    steals = False
+    if allow_steal and can_add_steal_card(existing, power_points):
+        steals = prompt_yes_no(
+            f"Spend {STEAL_PP_COST} PP so this card steals 1 opponent card for 1 turn? "
+            "(Only one steal card per deck.)"
+        )
+    heavy_hit = False
+    if not steals and can_add_heavy_hit_card(existing):
+        heavy_hit = prompt_yes_no(
+            "Add Heavy Hit? (+50% damage/heal, clears target cooldowns for 2 turns; "
+            "one per deck.)"
+        )
+    budget = stat_budget(power_points, steals)
+    while True:
+        clear()
+        banner(f"Create Card {slot}/{DECK_SIZE}")
+        if steals:
+            print(
+                f"Spend {STEAL_PP_COST} PP on steal + {budget} PP on damage/heal "
+                f"({power_points} total)."
+            )
+        elif heavy_hit:
+            print(
+                f"Spend {power_points} power points on damage/heal. "
+                "Heavy Hit: +50% power, clears target cooldowns for 2 turns."
+            )
+        else:
+            print(f"Spend exactly {power_points} power points.")
+        print("Each point becomes either 1 damage or 1 heal.")
+        print("Damage hits the target; heal always returns to YOU.")
+        print("You cannot have two cards of the same type in your deck.\n")
+        print("Types: Sanctuary / Caretaker / Allrounder / Bruiser / Wrecker")
+        if existing:
+            taken = ", ".join(sorted({c.name for c in existing}))
+            print(f"Already in deck: {taken}\n")
 
-    damage = prompt_int("Damage points", 0, power_points)
-    heal = power_points - damage
-    print(f"  -> Heal points auto-set to {heal}")
-    card = craft_card(card_id, damage, power_points, existing)
-    print(f"  -> Auto-named: {card.name}")
-    print()
-    print_card(card)
-    print()
-    pause("Card saved — press Enter...")
-    return card
+        damage = prompt_int("Damage points", 0, budget)
+        heal = budget - damage
+        print(f"  -> Heal points auto-set to {heal}")
+        try:
+            card = craft_card(
+                card_id,
+                damage,
+                power_points,
+                existing,
+                steals=steals,
+                heavy_hit=heavy_hit,
+            )
+        except ValueError as exc:
+            print(f"  -> {exc}")
+            pause()
+            continue
+        print(f"  -> Auto-named: {card.name}")
+        if card.steals:
+            print("  -> Steal: takes 1 opponent card for 1 turn")
+        if card.heavy_hit:
+            print("  -> Heavy Hit: +50% power, clears target cooldowns for 2 turns")
+        print()
+        print_card(card)
+        print()
+        pause("Card saved — press Enter...")
+        return card
 
 
 def create_fifth_card(existing: list[Card]) -> Card:
@@ -141,6 +206,59 @@ def create_fifth_card(existing: list[Card]) -> Card:
     print()
     pause("Card saved — press Enter...")
     return card
+
+
+def create_player_deck(player_num: int, total_players: int, power_points: int) -> list[Card]:
+    clear()
+    banner(f"Card Lab — player-{player_num}/{total_players}")
+    print(f"player-{player_num}, build your deck of 5 cards.")
+    print(f"Cards 1–4: {power_points} power points each.")
+    print(f"Card 5: Mercy ({FIFTH_CARD_HEAL} heal, any target).")
+    print("After everyone crafts, craftable cards are shuffled and re-dealt.")
+    print("Mercy and steal cards always stay with the player who made them.")
+    print("Heavy Hit cards also stay with their owner.\n")
+    pause()
+
+    deck: list[Card] = []
+    for slot in range(1, DECK_SIZE):
+        deck.append(create_card(slot, slot, power_points, deck))
+    deck.append(create_fifth_card(deck))
+
+    clear()
+    banner(f"player-{player_num} Deck Ready")
+    for i, card in enumerate(deck, start=1):
+        print_card(card, i)
+    print()
+    pause("Pass the device to the next player...")
+    return deck
+
+
+def create_all_player_decks(player_count: int, power_points: int) -> list[list[Card]]:
+    clear()
+    banner("Card Lab")
+    print(f"Each of the {player_count} players builds a deck of {DECK_SIZE} cards.")
+    print(f"Cards 1–4: {power_points} power points each.")
+    print(f"Card 5: Mercy ({FIFTH_CARD_HEAL} heal, any target).")
+    print("\nWhen everyone is done, craftable cards are combined, shuffled, and dealt.")
+    print("Mercy, steal, and Heavy Hit cards stay with whoever crafted them.\n")
+    pause()
+
+    return [
+        create_player_deck(n, player_count, power_points)
+        for n in range(1, player_count + 1)
+    ]
+
+
+def show_deal_summary(players: list[Player]) -> None:
+    clear()
+    banner("Cards Shuffled & Dealt")
+    print("Craftable cards were shuffled and dealt. Mercy/steal stayed with owners.\n")
+    for player in players:
+        print(f"{player.name}:")
+        for i, card in enumerate(player.hand, start=1):
+            print_card(card, i)
+        print()
+    pause()
 
 
 def create_shared_deck(power_points: int, for_solo: bool = False) -> list[Card]:
@@ -162,7 +280,9 @@ def create_shared_deck(power_points: int, for_solo: bool = False) -> list[Card]:
 
     deck: list[Card] = []
     for slot in range(1, DECK_SIZE):
-        deck.append(create_card(slot, slot, power_points, deck))
+        deck.append(
+            create_card(slot, slot, power_points, deck, allow_steal=not for_solo)
+        )
     deck.append(create_fifth_card(deck))
 
     clear()
@@ -238,7 +358,23 @@ def announce_play(player: Player, card: Card) -> None:
         )
 
 
-def play_turn(players: list[Player], active: int, starting_hp: int) -> None:
+def resolve_steal_if_needed(
+    card: Card,
+    players: list[Player],
+    active: int,
+    target_idx: int,
+    borrows: list[ActiveBorrow],
+) -> None:
+    for line in resolve_steal(card, players, active, target_idx, borrows):
+        print(f"  -> {line}")
+
+
+def play_turn(
+    players: list[Player],
+    active: int,
+    starting_hp: int,
+    borrows: list[ActiveBorrow],
+) -> list[ActiveBorrow]:
     player = players[active]
     clear()
     banner(f"Turn — {player.name}")
@@ -249,19 +385,29 @@ def play_turn(players: list[Player], active: int, starting_hp: int) -> None:
         print(f"{player.name} has no playable cards — turn skipped.")
         player.last_card_id = None
         turn_delay()
-        return
+        borrows, return_logs = return_expired_borrows(players, active, borrows)
+        for line in return_logs:
+            print(f"  -> {line}")
+        for line in tick_turn_cooldowns(players, active):
+            print(f"  -> {line}")
+        return borrows
 
     if player.is_bot:
         print("Bot hand:")
         for i, card in enumerate(player.hand, start=1):
-            print_card(card, i, cooling_down=(card.id == player.last_card_id))
+            print_card(card, i, cooling_down=card_is_cooling(player, card))
         print()
         choice = bot_choose_play(players, active, starting_hp)
         if choice is None:
             print("Bot has no playable cards — turn skipped.")
             player.last_card_id = None
             turn_delay()
-            return
+            borrows, return_logs = return_expired_borrows(players, active, borrows)
+            for line in return_logs:
+                print(f"  -> {line}")
+            for line in tick_turn_cooldowns(players, active):
+                print(f"  -> {line}")
+            return borrows
         card, target_idx, reason = choice
         player.last_card_id = card.id
         print(f"Bot plan: {reason}\n")
@@ -270,20 +416,26 @@ def play_turn(players: list[Player], active: int, starting_hp: int) -> None:
         print("\n--- Resolve ---")
         for line in resolve_card(card, players, active, target_idx):
             print(f"  -> {line}")
+        resolve_steal_if_needed(card, players, active, target_idx, borrows)
         print()
         print_status(players)
         turn_delay("Ending bot turn...")
-        return
+        borrows, return_logs = return_expired_borrows(players, active, borrows)
+        for line in return_logs:
+            print(f"  -> {line}")
+        for line in tick_turn_cooldowns(players, active):
+            print(f"  -> {line}")
+        return borrows
 
     print("Your cards (reuse allowed; not twice in a row):\n")
     for i, card in enumerate(player.hand, start=1):
-        print_card(card, i, cooling_down=(card.id == player.last_card_id))
+        print_card(card, i, cooling_down=card_is_cooling(player, card))
     print()
 
     while True:
         pick = prompt_int("Play which card #", 1, len(player.hand)) - 1
         card = player.hand[pick]
-        if card.id == player.last_card_id:
+        if card_is_cooling(player, card):
             print(f"  '{card.name}' is cooling down — pick a different card.")
             continue
         break
@@ -298,14 +450,22 @@ def play_turn(players: list[Player], active: int, starting_hp: int) -> None:
         print("\n--- Resolve ---")
         for line in resolve_card(card, players, active, target_idx):
             print(f"  -> {line}")
+        resolve_steal_if_needed(card, players, active, target_idx, borrows)
 
     print()
     print_status(players)
     turn_delay("Ending turn...")
+    borrows, return_logs = return_expired_borrows(players, active, borrows)
+    for line in return_logs:
+        print(f"  -> {line}")
+    for line in tick_turn_cooldowns(players, active):
+        print(f"  -> {line}")
+    return borrows
 
 
 def game_loop(players: list[Player], starting_hp: int) -> None:
     active = 0
+    borrows: list[ActiveBorrow] = []
     while True:
         if not players[active].alive:
             nxt = next_alive_index(players, active)
@@ -315,7 +475,7 @@ def game_loop(players: list[Player], starting_hp: int) -> None:
             continue
 
         pass_device(players[active])
-        play_turn(players, active, starting_hp)
+        borrows = play_turn(players, active, starting_hp, borrows)
 
         winner = check_winner(players)
         if winner is not None:
@@ -347,11 +507,11 @@ def main() -> None:
         pause()
 
         settings = choose_match_settings()
-        human_deck = create_shared_deck(
-            settings.power_points, for_solo=settings.vs_bot
-        )
 
         if settings.vs_bot:
+            human_deck = create_shared_deck(
+                settings.power_points, for_solo=True
+            )
             bot_deck = make_bot_deck(settings.power_points)
             players = make_solo_players(
                 human_deck, bot_deck, settings.starting_hp
@@ -363,9 +523,13 @@ def main() -> None:
             print()
             pause()
         else:
-            players = make_players(
-                settings.player_count, human_deck, settings.starting_hp
+            player_decks = create_all_player_decks(
+                settings.player_count, settings.power_points
             )
+            players = make_players_from_mixed_decks(
+                player_decks, settings.starting_hp
+            )
+            show_deal_summary(players)
 
         clear()
         banner("Players")
