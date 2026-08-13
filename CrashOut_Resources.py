@@ -4,30 +4,51 @@
 from __future__ import annotations
 
 import copy
+import json
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
-DEFAULT_STARTING_HP = 100
-DEFAULT_POWER_POINTS = 50
+DEFAULT_STARTING_HP = 500
+DEFAULT_POWER_POINTS = 100
 PLAYER_COUNT_MIN = 1
 PLAYER_COUNT_MAX = 4
-DECK_SIZE = 5  # default max cards (includes Mercy as last card)
+DECK_SIZE = 10  # default max cards (includes Mercy as last card)
 DECK_SIZE_MIN = 3
-DECK_SIZE_MAX = 12
-# Above this size, duplicate archetypes (Bruiser, etc.) are allowed.
-# Steal / Heavy Hit attributes stay unique regardless.
-ARCHETYPE_UNIQUE_LIMIT = 7
+DECK_SIZE_MAX = 20
+# Duplicate archetypes (Bruiser, etc.) only when deck_size > this (i.e. 12+).
+# Steal / Heavy Hit / Shield / Poison stay unique regardless.
+ARCHETYPE_UNIQUE_LIMIT = 11
 FIFTH_CARD_HEAL = 25
 STEAL_PP_COST = 25
 HEAVY_HIT_MULTIPLIER = 1.5
 COOLDOWN_CLEAR_TURNS = 2
 HEAVY_HIT_COOLDOWN_TURNS = 2
+# Damage% buckets for card names: every 10% PP (0%, 10%, …, 100%).
+ARCHETYPE_BUCKETS = 10
 BORROW_TURNS = 2  # return after thief ends this many turns (steal turn + 1 more)
+POISON_DURATION_TURNS = 3
+POISON_DOT_FRACTION = 0.10
 BOT_NAME = "bot"
 HP_MIN, HP_MAX = 1, 9999
 PP_MIN, PP_MAX = 1, 999
 TURN_DELAY_MS = 500
 TURN_DELAY_SEC = 0.5
+
+ARCHETYPE_NAMES: dict[int, str] = {
+    0: "Sanctuary",
+    1: "Haven",
+    2: "Caretaker",
+    3: "Medic",
+    4: "Hybrid",
+    5: "Allrounder",
+    6: "Skirmisher",
+    7: "Bruiser",
+    8: "Brawler",
+    9: "Destroyer",
+    10: "Wrecker",
+}
 
 
 @dataclass
@@ -39,6 +60,8 @@ class Card:
     heal_any: bool = False
     steals: bool = False
     heavy_hit: bool = False
+    shields: bool = False
+    poisons: bool = False
     borrowed_from: int | None = None
     cooldown_remaining: int = 0
 
@@ -56,6 +79,14 @@ class Card:
                 + f" / {HEAVY_HIT_COOLDOWN_TURNS}-turn cooldown"
                 + f" / clears target cooldowns for {COOLDOWN_CLEAR_TURNS} turns"
             )
+        if self.shields:
+            return base + " / gain Shield (block next damage; costs half PP)"
+        if self.poisons:
+            tick = poison_tick_damage(dmg)
+            return (
+                base
+                + f" / Poison ({tick} dmg/turn for {POISON_DURATION_TURNS} turns)"
+            )
         return base
 
     def label(self) -> str:
@@ -69,6 +100,10 @@ class Card:
                 extra_note = " + steal"
             elif self.heavy_hit:
                 extra_note = " + Heavy Hit"
+            elif self.shields:
+                extra_note = " + Shield"
+            elif self.poisons:
+                extra_note = " + Poison"
             if not extra:
                 base = f"{self.name} — {primary_line}{extra_note}"
             else:
@@ -101,6 +136,13 @@ class Card:
         elif self.heavy_hit:
             heavy_line = f"{HEAVY_HIT_COOLDOWN_TURNS}t cd / clear cd {COOLDOWN_CLEAR_TURNS}t"
             extra = f"{extra} / {heavy_line}" if extra else heavy_line
+        elif self.shields:
+            shield_line = "block next hit"
+            extra = f"{extra} / {shield_line}" if extra else shield_line
+        elif self.poisons:
+            tick = poison_tick_damage(dmg)
+            poison_line = f"poison {tick}x{POISON_DURATION_TURNS}"
+            extra = f"{extra} / {poison_line}" if extra else poison_line
         return primary, extra
 
 
@@ -113,6 +155,12 @@ class ActiveBorrow:
 
 
 @dataclass
+class ActivePoison:
+    damage_per_tick: int
+    turns_left: int
+
+
+@dataclass
 class Player:
     name: str
     hp: int
@@ -120,6 +168,8 @@ class Player:
     hand: list[Card] = field(default_factory=list)
     last_card_id: int | None = None
     cooldown_clear_turns: int = 0
+    shield_charges: int = 0
+    poisons: list[ActivePoison] = field(default_factory=list)
 
     @property
     def alive(self) -> bool:
@@ -128,6 +178,10 @@ class Player:
     @property
     def is_bot(self) -> bool:
         return self.name == BOT_NAME
+
+    @property
+    def poisoned(self) -> bool:
+        return any(p.turns_left > 0 for p in self.poisons)
 
     def playable_cards(self) -> list[Card]:
         return [c for c in self.hand if not card_is_cooling(self, c)]
@@ -185,7 +239,7 @@ class MatchSettings:
 
 
 def allows_duplicate_archetypes(deck_size: int) -> bool:
-    """Duplicate Sanctuary/Bruiser/etc. when deck is larger than 7."""
+    """Duplicate Sanctuary/Bruiser/etc. only when deck has 12+ cards."""
     return deck_size > ARCHETYPE_UNIQUE_LIMIT
 
 
@@ -199,24 +253,17 @@ def name_for_split(damage: int, heal: int, power_points: int) -> str:
     if power_points <= 0:
         return "Allrounder"
     ratio = damage / power_points
-    bucket = int(round(ratio * 4))
-    bucket = max(0, min(4, bucket))
-    names = {
-        0: "Sanctuary",
-        1: "Caretaker",
-        2: "Allrounder",
-        3: "Bruiser",
-        4: "Wrecker",
-    }
-    return names[bucket]
+    bucket = int(round(ratio * ARCHETYPE_BUCKETS))
+    bucket = max(0, min(ARCHETYPE_BUCKETS, bucket))
+    return ARCHETYPE_NAMES[bucket]
 
 
 def damage_for_bucket(bucket: int, power_points: int) -> int:
     if bucket <= 0:
         return 0
-    if bucket >= 4:
+    if bucket >= ARCHETYPE_BUCKETS:
         return power_points
-    return int(round(power_points * bucket / 4))
+    return int(round(power_points * bucket / ARCHETYPE_BUCKETS))
 
 
 def uniquify_name(base: str, existing: list[Card]) -> str:
@@ -230,11 +277,15 @@ def uniquify_name(base: str, existing: list[Card]) -> str:
 
 
 def card_archetype(card: Card) -> str:
-    """Sanctuary / Caretaker / Allrounder / Bruiser / Wrecker / Mercy / Heavy Hit."""
+    """Archetype / Mercy / Heavy Hit / Shield / Poison name used for uniqueness."""
     if card.heal_any:
         return "Mercy"
     if card.heavy_hit:
         return "Heavy Hit"
+    if card.shields:
+        return "Shield"
+    if card.poisons:
+        return "Poison"
     return name_for_split(card.damage, card.heal, card.damage + card.heal)
 
 
@@ -242,14 +293,31 @@ def archetype_taken(archetype: str, existing: list[Card]) -> bool:
     return any(card_archetype(c) == archetype for c in existing)
 
 
-def stat_budget(power_points: int, steals: bool) -> int:
+def stat_budget(
+    power_points: int,
+    steals: bool = False,
+    *,
+    shields: bool = False,
+) -> int:
     if steals:
         return power_points - STEAL_PP_COST
+    if shields:
+        return power_points - shield_pp_cost(power_points)
     return power_points
+
+
+def shield_pp_cost(power_points: int) -> int:
+    """Shield spends half the card's power points."""
+    return max(0, int(power_points) // 2)
 
 
 def can_craft_steal(power_points: int) -> bool:
     return power_points >= STEAL_PP_COST
+
+
+def can_craft_shield(power_points: int) -> bool:
+    """Need at least 1 PP left for heal after paying half for Shield."""
+    return shield_pp_cost(power_points) < power_points
 
 
 def deck_has_steal(existing: list[Card]) -> bool:
@@ -266,6 +334,33 @@ def deck_has_heavy_hit(existing: list[Card]) -> bool:
 
 def can_add_heavy_hit_card(existing: list[Card]) -> bool:
     return not deck_has_heavy_hit(existing)
+
+
+def deck_has_shield(existing: list[Card]) -> bool:
+    return any(c.shields for c in existing)
+
+
+def can_add_shield_card(existing: list[Card], power_points: int | None = None) -> bool:
+    if deck_has_shield(existing):
+        return False
+    if power_points is not None and not can_craft_shield(power_points):
+        return False
+    return True
+
+
+def deck_has_poison(existing: list[Card]) -> bool:
+    return any(c.poisons for c in existing)
+
+
+def can_add_poison_card(existing: list[Card]) -> bool:
+    return not deck_has_poison(existing)
+
+
+def poison_tick_damage(card_damage: int) -> int:
+    """10% of card damage per poison tick (at least 1 if the hit had damage)."""
+    if card_damage <= 0:
+        return 0
+    return max(1, int(round(card_damage * POISON_DOT_FRACTION)))
 
 
 def effective_card_stats(card: Card) -> tuple[int, int]:
@@ -285,25 +380,47 @@ def craft_card(
     *,
     steals: bool = False,
     heavy_hit: bool = False,
+    shields: bool = False,
+    poisons: bool = False,
     deck_size: int = DECK_SIZE,
 ) -> Card:
     """
     Build a craftable card.
-    Steal and Heavy Hit stay unique. Normal archetypes are unique unless
+    Steal, Heavy Hit, Shield, and Poison stay unique. Normal archetypes are unique unless
     deck_size is above ARCHETYPE_UNIQUE_LIMIT (then duplicates get numbered names).
     """
-    if steals and heavy_hit:
-        raise ValueError("A card cannot have both steal and Heavy Hit.")
+    uniques = sum(1 for flag in (steals, heavy_hit, shields, poisons) if flag)
+    if uniques > 1:
+        raise ValueError(
+            "A card can only have one of: Steal, Heavy Hit, Shield, or Poison."
+        )
     if steals and not can_craft_steal(power_points):
         raise ValueError(f"Steal costs {STEAL_PP_COST} PP — not enough budget.")
     if steals and deck_has_steal(existing):
         raise ValueError("Your deck already has a steal card. Only one per deck.")
     if heavy_hit and deck_has_heavy_hit(existing):
         raise ValueError("Your deck already has a Heavy Hit card. Only one per deck.")
-    budget = stat_budget(power_points, steals)
+    if shields and deck_has_shield(existing):
+        raise ValueError("Your deck already has a Shield card. Only one per deck.")
+    if shields and not can_craft_shield(power_points):
+        raise ValueError("Shield costs half your PP — not enough left for heal.")
+    if poisons and deck_has_poison(existing):
+        raise ValueError("Your deck already has a Poison card. Only one per deck.")
+    budget = stat_budget(power_points, steals, shields=shields)
     damage = max(0, min(budget, damage))
     heal = budget - damage
-    base = "Heavy Hit" if heavy_hit else name_for_split(damage, heal, budget)
+    if shields and damage > 0:
+        raise ValueError("Shield can only be put on a heal-only card (0 damage).")
+    if poisons and heal > 0:
+        raise ValueError("Poison can only be put on a damage-only card (0 heal).")
+    if heavy_hit:
+        base = "Heavy Hit"
+    elif shields:
+        base = "Shield"
+    elif poisons:
+        base = "Poison"
+    else:
+        base = name_for_split(damage, heal, budget)
     allow_dupes = allows_duplicate_archetypes(deck_size)
     if archetype_taken(base, existing) and not allow_dupes:
         raise ValueError(
@@ -319,6 +436,8 @@ def craft_card(
         heal_any=False,
         steals=steals,
         heavy_hit=heavy_hit,
+        shields=shields,
+        poisons=poisons,
     )
 
 
@@ -335,10 +454,165 @@ def make_mercy_card(card_id: int = DECK_SIZE, existing: list[Card] | None = None
     )
 
 
+DECK_FILE_FORMAT = "crash_out_deck"
+DECK_FILE_VERSION = 1
+DECKS_DIR_NAME = "decks"
+
+
+def card_to_dict(card: Card) -> dict[str, Any]:
+    return {
+        "name": card.name,
+        "damage": int(card.damage),
+        "heal": int(card.heal),
+        "heal_any": bool(card.heal_any),
+        "steals": bool(card.steals),
+        "heavy_hit": bool(card.heavy_hit),
+        "shields": bool(card.shields),
+        "poisons": bool(card.poisons),
+    }
+
+
+def card_from_dict(data: dict[str, Any], card_id: int) -> Card:
+    return Card(
+        id=card_id,
+        name=str(data.get("name") or f"Card{card_id}"),
+        damage=max(0, int(data.get("damage", 0))),
+        heal=max(0, int(data.get("heal", 0))),
+        heal_any=bool(data.get("heal_any", False)),
+        steals=bool(data.get("steals", False)),
+        heavy_hit=bool(data.get("heavy_hit", False)),
+        shields=bool(data.get("shields", False)),
+        poisons=bool(data.get("poisons", False)),
+    )
+
+
+def build_deck_export(
+    cards: list[Card],
+    *,
+    power_points: int,
+    deck_size: int | None = None,
+    name: str = "",
+) -> dict[str, Any]:
+    """
+    Build a portable deck JSON object.
+    If Mercy is missing, append one so the file is a complete playable deck.
+    """
+    exported = [copy.deepcopy(c) for c in cards]
+    size = deck_size or max(len(exported) + (0 if any(c.heal_any for c in exported) else 1), DECK_SIZE_MIN)
+    size = clamp_deck_size(size)
+    if not any(c.heal_any for c in exported):
+        exported.append(make_mercy_card(size, exported))
+    # Normalize ids 1..n
+    for i, card in enumerate(exported, start=1):
+        card.id = i
+        card.borrowed_from = None
+        card.cooldown_remaining = 0
+    return {
+        "format": DECK_FILE_FORMAT,
+        "version": DECK_FILE_VERSION,
+        "name": name or "Saved Deck",
+        "power_points": int(power_points),
+        "deck_size": len(exported),
+        "cards": [card_to_dict(c) for c in exported],
+    }
+
+
+def validate_deck_export(data: dict[str, Any]) -> tuple[list[Card], int, str]:
+    """
+    Parse and validate a deck file.
+    Returns (cards, power_points, deck_name). Raises ValueError on bad data.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Deck file must be a JSON object.")
+    if data.get("format") != DECK_FILE_FORMAT:
+        raise ValueError("Not a Crash Out deck file.")
+    cards_raw = data.get("cards")
+    if not isinstance(cards_raw, list) or not cards_raw:
+        raise ValueError("Deck file has no cards.")
+    power_points = int(data.get("power_points", DEFAULT_POWER_POINTS))
+    if not (PP_MIN <= power_points <= PP_MAX):
+        raise ValueError(f"Invalid power points in deck file ({power_points}).")
+    deck_name = str(data.get("name") or "Saved Deck")
+
+    cards: list[Card] = []
+    for i, raw in enumerate(cards_raw, start=1):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Card {i} is invalid.")
+        card = card_from_dict(raw, i)
+        unique_flags = sum(
+            1
+            for flag in (card.steals, card.heavy_hit, card.shields, card.poisons)
+            if flag
+        )
+        if unique_flags > 1:
+            raise ValueError(
+                f"Card '{card.name}' can only have one of: "
+                "Steal, Heavy Hit, Shield, or Poison."
+            )
+        if card.heal_any:
+            if card.steals or card.heavy_hit or card.shields or card.poisons:
+                raise ValueError(
+                    f"Mercy card '{card.name}' cannot have Steal/Heavy Hit/Shield/Poison."
+                )
+        else:
+            budget = stat_budget(power_points, card.steals, shields=card.shields)
+            if card.damage + card.heal != budget:
+                raise ValueError(
+                    f"Card '{card.name}' stats ({card.damage}+{card.heal}) "
+                    f"do not match {power_points} PP budget ({budget})."
+                )
+            if card.shields and card.damage > 0:
+                raise ValueError(
+                    f"Shield card '{card.name}' must be heal-only (0 damage)."
+                )
+            if card.poisons and card.heal > 0:
+                raise ValueError(
+                    f"Poison card '{card.name}' must be damage-only (0 heal)."
+                )
+        cards.append(card)
+
+    if len(cards) < DECK_SIZE_MIN or len(cards) > DECK_SIZE_MAX:
+        raise ValueError(
+            f"Deck size must be {DECK_SIZE_MIN}-{DECK_SIZE_MAX} (got {len(cards)})."
+        )
+    mercies = [c for c in cards if c.heal_any]
+    if len(mercies) != 1:
+        raise ValueError("Deck must include exactly one Mercy card.")
+    if sum(1 for c in cards if c.steals) > 1:
+        raise ValueError("Deck can only have one steal card.")
+    if sum(1 for c in cards if c.heavy_hit) > 1:
+        raise ValueError("Deck can only have one Heavy Hit card.")
+    if sum(1 for c in cards if c.shields) > 1:
+        raise ValueError("Deck can only have one Shield card.")
+    if sum(1 for c in cards if c.poisons) > 1:
+        raise ValueError("Deck can only have one Poison card.")
+    return cards, power_points, deck_name
+
+
+def save_deck_file(path: Path | str, payload: dict[str, Any]) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    return path
+
+
+def load_deck_file(path: Path | str) -> dict[str, Any]:
+    path = Path(path)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Deck file must be a JSON object.")
+    return data
+
+
+def default_decks_dir(project_root: Path | None = None) -> Path:
+    root = project_root or Path(__file__).resolve().parent
+    return root / DECKS_DIR_NAME
+
+
 def make_bot_deck(power_points: int, deck_size: int = DECK_SIZE) -> list[Card]:
     deck_size = clamp_deck_size(deck_size)
-    # Preferred craftable pattern; cycles when deck_size is larger.
-    buckets = [1, 3, 4, 0, 2]  # Caretaker, Bruiser, Wrecker, Sanctuary, Allrounder
+    # Preferred craftable pattern across 10% buckets; cycles when deck is larger.
+    buckets = [2, 7, 10, 0, 5, 3, 8, 1, 9, 4]
     craftable = max(0, deck_size - 1)
     deck: list[Card] = []
     for i in range(craftable):
@@ -366,8 +640,14 @@ def normalize_hand_ids(hand: list[Card]) -> list[Card]:
 
 
 def is_protected_card(card: Card) -> bool:
-    """Mercy, steal, and Heavy Hit cards stay with the player who crafted them."""
-    return card.heal_any or card.steals or card.heavy_hit
+    """Mercy and unique-attribute cards stay with the player who crafted them."""
+    return (
+        card.heal_any
+        or card.steals
+        or card.heavy_hit
+        or card.shields
+        or card.poisons
+    )
 
 
 def shuffle_and_deal_hands(player_decks: list[list[Card]]) -> list[list[Card]]:
@@ -452,10 +732,41 @@ def make_solo_players(
     ]
 
 
-def apply_damage(target: Player, damage: int) -> list[str]:
+def apply_damage(
+    target: Player,
+    damage: int,
+    *,
+    bypass_shield: bool = False,
+) -> list[str]:
+    if damage <= 0:
+        return []
+    if not bypass_shield and target.shield_charges > 0:
+        target.shield_charges -= 1
+        try:
+            from crash_out_sfx import SFX_SHIELD_BLOCK, play_sfx
+
+            play_sfx(SFX_SHIELD_BLOCK)
+        except Exception:
+            pass
+        return [
+            f"{target.name}'s Shield blocks {damage} damage!"
+            + (" (Shield spent.)" if target.shield_charges <= 0 else "")
+        ]
     target.hp = max(0, target.hp - damage)
     if target.hp == 0:
+        try:
+            from crash_out_sfx import SFX_CRASH_OUT, play_sfx
+
+            play_sfx(SFX_CRASH_OUT)
+        except Exception:
+            pass
         return [f"{target.name} takes {damage} damage and is OUT!"]
+    try:
+        from crash_out_sfx import SFX_DAMAGE, play_sfx
+
+        play_sfx(SFX_DAMAGE)
+    except Exception:
+        pass
     return [
         f"{target.name} takes {damage} damage ({target.hp}/{target.max_hp} HP left)"
     ]
@@ -465,6 +776,13 @@ def apply_heal(target: Player, amount: int) -> list[str]:
     before = target.hp
     target.hp = min(target.max_hp, target.hp + amount)
     gained = target.hp - before
+    if gained > 0:
+        try:
+            from crash_out_sfx import SFX_HEAL, play_sfx
+
+            play_sfx(SFX_HEAL, delay_ms=90)
+        except Exception:
+            pass
     if gained < amount:
         return [
             f"{target.name} heals {gained} HP "
@@ -510,6 +828,8 @@ def resolve_card(
             logs.append(
                 f"{card.name} is on cooldown for {HEAVY_HIT_COOLDOWN_TURNS} turns."
             )
+        if card.shields:
+            logs.extend(apply_shield(caster))
         return logs
 
     if damage > 0:
@@ -526,6 +846,68 @@ def resolve_card(
         logs.append(
             f"{card.name} is on cooldown for {HEAVY_HIT_COOLDOWN_TURNS} turns."
         )
+    if card.shields:
+        logs.extend(apply_shield(caster))
+    # Poison applies even if Shield blocked the main hit.
+    if card.poisons and target.alive:
+        logs.extend(apply_poison(target, poison_tick_damage(damage)))
+    return logs
+
+
+def apply_shield(caster: Player) -> list[str]:
+    caster.shield_charges = 1
+    try:
+        from crash_out_sfx import SFX_SHIELD, play_sfx
+
+        play_sfx(SFX_SHIELD)
+    except Exception:
+        pass
+    return [f"{caster.name} gains Shield — the next damage against them is blocked."]
+
+
+def apply_poison(
+    target: Player,
+    damage_per_tick: int,
+    *,
+    turns: int = POISON_DURATION_TURNS,
+) -> list[str]:
+    if damage_per_tick <= 0 or turns <= 0:
+        return []
+    target.poisons.append(
+        ActivePoison(damage_per_tick=damage_per_tick, turns_left=turns)
+    )
+    try:
+        from crash_out_sfx import SFX_POISON, play_sfx
+
+        play_sfx(SFX_POISON)
+    except Exception:
+        pass
+    return [
+        f"{target.name} is poisoned — {damage_per_tick} damage at the start of "
+        f"their turn for {turns} turns (ignores Shield)."
+    ]
+
+
+def tick_poisons_on_turn_start(player: Player) -> list[str]:
+    """Apply poison DoT at the start of this player's turn (bypasses Shield)."""
+    if not player.poisons:
+        return []
+    logs: list[str] = []
+    remaining: list[ActivePoison] = []
+    for effect in player.poisons:
+        if effect.turns_left <= 0 or not player.alive:
+            continue
+        logs.append(f"Poison ticks on {player.name}...")
+        logs.extend(
+            apply_damage(player, effect.damage_per_tick, bypass_shield=True)
+        )
+        effect.turns_left -= 1
+        if effect.turns_left > 0 and player.alive:
+            remaining.append(effect)
+            logs.append(f"({effect.turns_left} poison turn(s) left.)")
+        elif player.alive:
+            logs.append(f"Poison on {player.name} wore off.")
+    player.poisons = remaining
     return logs
 
 
@@ -540,6 +922,12 @@ def apply_heavy_hit_cooldown_effect(
         if keep_card_id is not None and held.id == keep_card_id:
             continue
         held.cooldown_remaining = 0
+    try:
+        from crash_out_sfx import SFX_HEAVY_HIT, play_sfx
+
+        play_sfx(SFX_HEAVY_HIT)
+    except Exception:
+        pass
     return [
         f"{target.name}'s cooldowns are cleared for {COOLDOWN_CLEAR_TURNS} turns "
         "(Heavy Hit)."
@@ -554,12 +942,24 @@ def tick_turn_cooldowns(players: list[Player], ending_idx: int) -> list[str]:
         if player.cooldown_clear_turns <= 0:
             player.cooldown_clear_turns = 0
             logs.append(f"{player.name}'s Heavy Hit cooldown relief ended.")
+            try:
+                from crash_out_sfx import SFX_RELIEF_END, play_sfx
+
+                play_sfx(SFX_RELIEF_END)
+            except Exception:
+                pass
     for held in player.hand:
         if held.cooldown_remaining <= 0:
             continue
         held.cooldown_remaining -= 1
         if held.cooldown_remaining <= 0 and held.heavy_hit:
             logs.append(f"{player.name}'s Heavy Hit is ready.")
+            try:
+                from crash_out_sfx import SFX_HH_READY, play_sfx
+
+                play_sfx(SFX_HH_READY)
+            except Exception:
+                pass
     return logs
 
 
@@ -593,6 +993,12 @@ def resolve_steal(
         return []
     victim = players[target_idx]
     if not victim.hand:
+        try:
+            from crash_out_sfx import SFX_STEAL_FAIL, play_sfx
+
+            play_sfx(SFX_STEAL_FAIL)
+        except Exception:
+            pass
         return [f"{victim.name} has no cards to steal."]
     steal_idx = random_steal_index(victim.hand)
     return apply_steal(players, active, target_idx, steal_idx, borrows)
@@ -609,6 +1015,12 @@ def apply_steal(
     thief = players[thief_idx]
     victim = players[victim_idx]
     if not victim.hand:
+        try:
+            from crash_out_sfx import SFX_STEAL_FAIL, play_sfx
+
+            play_sfx(SFX_STEAL_FAIL)
+        except Exception:
+            pass
         logs.append(f"{victim.name} has no cards to steal.")
         return logs
     hand_index = max(0, min(len(victim.hand) - 1, hand_index))
@@ -622,6 +1034,12 @@ def apply_steal(
             thief_idx=thief_idx,
         )
     )
+    try:
+        from crash_out_sfx import SFX_STEAL, play_sfx
+
+        play_sfx(SFX_STEAL)
+    except Exception:
+        pass
     logs.append(
         f"{thief.name} steals {stolen.name} from {victim.name} "
         f"(returns after {BORROW_TURNS - 1} more of {thief.name}'s turns)"
@@ -636,6 +1054,7 @@ def return_expired_borrows(
 ) -> tuple[list[ActiveBorrow], list[str]]:
     logs: list[str] = []
     still_active: list[ActiveBorrow] = []
+    returned = False
     for borrow in borrows:
         if borrow.thief_idx != ending_player_idx:
             still_active.append(borrow)
@@ -649,8 +1068,16 @@ def return_expired_borrows(
             borrow.card.borrowed_from = None
             owner.hand.append(borrow.card)
             logs.append(f"{borrow.card.name} returns to {owner.name}'s hand.")
+            returned = True
         else:
             still_active.append(borrow)
+    if returned:
+        try:
+            from crash_out_sfx import SFX_BORROW_RETURN, play_sfx
+
+            play_sfx(SFX_BORROW_RETURN)
+        except Exception:
+            pass
     return still_active, logs
 
 
@@ -743,4 +1170,10 @@ def describe_target(
         if target_idx == active:
             return who + " (self — +50% heal, 2-turn cooldown, clears your cooldowns 2 turns)"
         return who + " (damage them + heal you +50%, 2-turn cooldown, clears their cooldowns 2 turns)"
+    if card.shields:
+        if target_idx == active:
+            return who + " (self — heal yourself + gain Shield)"
+        return who + " (damage them + heal you + gain Shield)"
+    if card.poisons:
+        return who + " (damage them + Poison DoT)"
     return who + " (damage them + heal you)"

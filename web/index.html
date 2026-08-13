@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Crash Out — Browser</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div id="app">
+    <header class="top">
+      <h1>CRASH OUT</h1>
+      <p class="sub" id="connection">Connecting…</p>
+    </header>
+
+    <section id="screen-home" class="screen">
+      <label>Your name
+        <input id="name" maxlength="20" placeholder="Player" value="Player" />
+      </label>
+      <div class="row">
+        <button id="btn-create" class="btn primary">Create room (host)</button>
+      </div>
+      <div class="row join-row">
+        <input id="room-code" maxlength="8" placeholder="ROOM" class="code" />
+        <button id="btn-join" class="btn">Join room</button>
+      </div>
+      <p class="hint" id="host-hint"></p>
+    </section>
+
+    <section id="screen-lobby" class="screen hidden">
+      <h2>Lobby <span id="lobby-code" class="code-badge"></span></h2>
+      <ul id="seat-list" class="seat-list"></ul>
+      <div id="host-settings" class="panel hidden">
+        <h3>Host settings</h3>
+        <label>Players
+          <input type="number" id="set-players" min="2" max="4" value="2" />
+        </label>
+        <label>Starting HP
+          <input type="number" id="set-hp" min="1" max="9999" value="500" />
+        </label>
+        <label>Power points
+          <input type="number" id="set-pp" min="1" max="999" value="100" />
+        </label>
+        <label>Deck size
+          <input type="number" id="set-deck" min="3" max="20" value="10" />
+        </label>
+        <button id="btn-save-settings" class="btn">Save settings</button>
+        <button id="btn-start-craft" class="btn primary">Start Card Lab</button>
+      </div>
+      <p class="hint" id="lobby-hint">Waiting for host…</p>
+    </section>
+
+    <section id="screen-craft" class="screen hidden">
+      <h2>Card Lab <span id="craft-slot"></span></h2>
+      <p id="craft-rules" class="hint"></p>
+      <div class="panel" id="craft-form">
+        <label>Damage (rest = heal)
+          <input type="range" id="dmg-slider" min="0" max="100" value="50" />
+        </label>
+        <p id="split-preview" class="preview"></p>
+        <div class="unique-row">
+          <label class="chk"><input type="checkbox" id="u-steal" /> Steal</label>
+          <label class="chk"><input type="checkbox" id="u-heavy" /> Heavy Hit</label>
+          <label class="chk"><input type="checkbox" id="u-shield" /> Shield</label>
+          <label class="chk"><input type="checkbox" id="u-poison" /> Poison</label>
+        </div>
+        <button id="btn-craft" class="btn primary">Craft card</button>
+        <button id="btn-finish-craft" class="btn hidden">Finish (add Mercy) &amp; Ready</button>
+      </div>
+      <div id="craft-deck" class="card-row"></div>
+      <p id="craft-waiting" class="hint hidden">Waiting for other players…</p>
+    </section>
+
+    <section id="screen-play" class="screen hidden">
+      <div id="hud" class="hud"></div>
+      <p id="turn-banner" class="banner"></p>
+      <div id="hand" class="hand"></div>
+      <div id="targets" class="targets hidden"></div>
+      <button id="btn-cancel-target" class="btn hidden">Cancel</button>
+      <div id="play-log" class="log"></div>
+    </section>
+
+    <section id="screen-over" class="screen hidden">
+      <h2 id="over-title">Game over</h2>
+      <p class="hint">Refresh to create or join a new room.</p>
+      <div id="over-log" class="log"></div>
+    </section>
+
+    <p id="toast" class="toast hidden"></p>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
