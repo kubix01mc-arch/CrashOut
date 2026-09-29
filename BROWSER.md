@@ -1,6 +1,6 @@
-# Crash Out — Browser / WiFi multiplayer
+# Crash Out — Browser (hotseat-style + WiFi rooms)
 
-Desktop window and terminal modes are unchanged (`python play.py`).
+Desktop window/terminal modes are unchanged (`python play.py`).
 
 ## Setup (once)
 
@@ -8,24 +8,16 @@ Desktop window and terminal modes are unchanged (`python play.py`).
 python -m pip install -r requirements-browser.txt
 ```
 
-## Host a game
+## Run
 
 ```bash
 python play.py browser
 ```
 
-or:
+Same setup as window hotseat: match size (1 vs bot / 2–4 players), HP, PP, deck size.
 
-```bash
-python crash_out_browser.py
-```
++- **Host room** — creates a room with those settings; share the code
++- **Join** — enter a room code on the same WiFi
++- Vs bot (match size 1) goes straight into Card Lab
 
-- On this PC: open the URL printed (usually `http://127.0.0.1:8765`)
-- On phones/laptops on the **same WiFi**: open `http://<host-lan-ip>:8765`
-- Host clicks **Create room**, shares the room code; others **Join**
-
-## Flow
-
-Lobby → Card Lab (each player crafts privately) → Play (only your hand is shown) → Game over
-
-Rules come from the same `CrashOut_Resources.py` engine as the desktop game.
+Open `http://127.0.0.1:8765` locally, or `http://<lan-ip>:8765` from phones on WiFi.

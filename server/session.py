@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from CrashOut_Resources import (
+    BOT_NAME,
     DECK_SIZE,
     DECK_SIZE_MAX,
     DECK_SIZE_MIN,
@@ -25,6 +26,7 @@ from CrashOut_Resources import (
     MatchSettings,
     Player,
     allows_duplicate_archetypes,
+    bot_choose_play,
     can_add_heavy_hit_card,
     can_add_poison_card,
     can_add_shield_card,
@@ -34,8 +36,10 @@ from CrashOut_Resources import (
     check_winner,
     clamp_deck_size,
     craft_card,
+    make_bot_deck,
     make_mercy_card,
     make_players_from_mixed_decks,
+    make_solo_players,
     mark_card_played,
     next_alive_index,
     resolve_card,
@@ -103,6 +107,10 @@ class MatchSession:
     winner_name: str | None = None
     pending_card_id: int | None = None
 
+    @property
+    def vs_bot(self) -> bool:
+        return self.settings.player_count == 1
+
     def seat_by_token(self, token: str) -> Seat | None:
         for seat in self.seats.values():
             if seat.token == token:
@@ -122,8 +130,8 @@ class MatchSession:
             raise PermissionError("Only the host can change settings.")
         if self.phase != "lobby":
             raise RuntimeError("Settings are locked after the lobby.")
-        if not (2 <= player_count <= PLAYER_COUNT_MAX):
-            raise ValueError(f"Players must be 2-{PLAYER_COUNT_MAX}.")
+        if not (1 <= player_count <= PLAYER_COUNT_MAX):
+            raise ValueError(f"Players must be 1-{PLAYER_COUNT_MAX} (1 = vs bot).")
         if not (HP_MIN <= starting_hp <= HP_MAX):
             raise ValueError(f"HP must be {HP_MIN}-{HP_MAX}.")
         if not (PP_MIN <= power_points <= PP_MAX):
@@ -132,16 +140,19 @@ class MatchSession:
         if not (DECK_SIZE_MIN <= deck_size <= DECK_SIZE_MAX):
             raise ValueError(f"Deck size must be {DECK_SIZE_MIN}-{DECK_SIZE_MAX}.")
         self.settings = MatchSettings(player_count, starting_hp, power_points, deck_size)
-        # Drop seats that no longer fit.
+        # Drop seats that no longer fit (bot mode only keeps seat 0).
+        capacity = 1 if self.vs_bot else player_count
         for seat in list(self.seats):
-            if seat >= player_count:
+            if seat >= capacity:
                 del self.seats[seat]
 
     def join(self, name: str, preferred_seat: int | None = None) -> Seat:
         if self.phase != "lobby":
             raise RuntimeError("This room is no longer accepting players.")
+        if self.vs_bot and len(self.seats) >= 1 and preferred_seat != 0:
+            raise RuntimeError("This is a vs-bot room — only the host plays.")
         name = (name or "").strip()[:20] or "Player"
-        capacity = self.settings.player_count
+        capacity = 1 if self.vs_bot else self.settings.player_count
         if preferred_seat is not None and preferred_seat in self.seats:
             raise ValueError("That seat is taken.")
         if preferred_seat is not None and not (0 <= preferred_seat < capacity):
@@ -155,9 +166,6 @@ class MatchSession:
             raise ValueError("That seat is taken.")
         seat = Seat(seat=preferred_seat, name=name, token=_token())
         self.seats[preferred_seat] = seat
-        if not self.seats or preferred_seat == 0 and len(self.seats) == 1:
-            # First joiner becomes conceptual host seat 0; host_token already set at create.
-            pass
         return seat
 
     def start_craft(self, host_token: str) -> None:
@@ -165,16 +173,18 @@ class MatchSession:
             raise PermissionError("Only the host can start crafting.")
         if self.phase != "lobby":
             raise RuntimeError("Craft already started.")
-        if len(self.seats) < self.settings.player_count:
-            raise RuntimeError(
-                f"Need {self.settings.player_count} players "
-                f"(have {len(self.seats)})."
-            )
+        need = 1 if self.vs_bot else self.settings.player_count
+        if len(self.seats) < need:
+            raise RuntimeError(f"Need {need} player(s) (have {len(self.seats)}).")
         self.phase = "craft"
         for seat in self.seats.values():
             seat.deck = []
             seat.ready = False
-        self.log = ["Card Lab — craft your deck."]
+        self.log = (
+            ["Card Lab — craft your deck. Bot builds automatically."]
+            if self.vs_bot
+            else ["Card Lab — craft your deck."]
+        )
 
     def craft_next(
         self,
@@ -193,6 +203,8 @@ class MatchSession:
             raise PermissionError("Unknown player.")
         if seat.ready:
             raise RuntimeError("You already finished crafting.")
+        if steals and self.vs_bot:
+            raise ValueError("Steal is disabled in vs-bot mode.")
         need = self.settings.deck_size - 1  # last is Mercy
         if len(seat.deck) >= need:
             raise RuntimeError("All craftable cards are done — finish with Mercy.")
@@ -208,6 +220,12 @@ class MatchSession:
             deck_size=self.settings.deck_size,
         )
         seat.deck.append(card)
+        # Vs bot: finishing the last craftable card adds Mercy and starts the match.
+        if self.vs_bot and len(seat.deck) >= need:
+            if len(seat.deck) == need:
+                seat.deck.append(make_mercy_card(self.settings.deck_size, seat.deck))
+            seat.ready = True
+            self._begin_play()
         return card
 
     def finish_craft(self, token: str) -> None:
@@ -222,15 +240,27 @@ class MatchSession:
         if len(seat.deck) == need:
             seat.deck.append(make_mercy_card(self.settings.deck_size, seat.deck))
         seat.ready = True
-        if all(s.ready for s in self.seats.values()):
+        if self.vs_bot or all(s.ready for s in self.seats.values()):
             self._begin_play()
 
     def _begin_play(self) -> None:
-        ordered = [self.seats[i] for i in range(self.settings.player_count)]
-        decks = [copy.deepcopy(s.deck) for s in ordered]
-        self.players = make_players_from_mixed_decks(decks, self.settings.starting_hp)
-        for i, seat in enumerate(ordered):
-            self.players[i].name = seat.name
+        if self.vs_bot:
+            human = self.seats[0]
+            bot_deck = make_bot_deck(self.settings.power_points, self.settings.deck_size)
+            self.players = make_solo_players(
+                human.deck, bot_deck, self.settings.starting_hp
+            )
+            self.players[0].name = human.name
+            # ensure bot name stays BOT_NAME
+            self.players[1].name = BOT_NAME
+        else:
+            ordered = [self.seats[i] for i in range(self.settings.player_count)]
+            decks = [copy.deepcopy(s.deck) for s in ordered]
+            self.players = make_players_from_mixed_decks(
+                decks, self.settings.starting_hp
+            )
+            for i, seat in enumerate(ordered):
+                self.players[i].name = seat.name
         self.active = 0
         self.borrows = []
         self.pending_card_id = None
@@ -282,11 +312,20 @@ class MatchSession:
         if card is None:
             self.pending_card_id = None
             raise ValueError("Card no longer in hand.")
+        self.pending_card_id = None
+        self._execute_play(card, target_idx)
 
+    def _execute_play(self, card: Card, target_idx: int) -> None:
+        player = self.players[self.active]
+        target = self.players[target_idx]
         self.log.append(f"{player.name} plays {card.name} → {target.name}")
-        logs = resolve_card(card, self.players, self.active, target_idx)
+        logs = resolve_card(
+            card, self.players, self.active, target_idx, self.borrows
+        )
         self.log.extend(logs)
-        steal_logs = resolve_steal(card, self.players, self.active, target_idx, self.borrows)
+        steal_logs = resolve_steal(
+            card, self.players, self.active, target_idx, self.borrows
+        )
         self.log.extend(steal_logs)
         mark_card_played(player, card)
 
@@ -320,6 +359,34 @@ class MatchSession:
             self.winner_name = winner.name
             self.log.append(f"{winner.name} wins!")
 
+    def bot_should_act(self) -> bool:
+        return (
+            self.phase == "play"
+            and bool(self.players)
+            and self.players[self.active].is_bot
+        )
+
+    def run_one_bot_turn(self) -> None:
+        """Resolve one bot turn (no-op if it is not the bot's turn)."""
+        if not self.bot_should_act():
+            return
+        choice = bot_choose_play(
+            self.players, self.active, self.settings.starting_hp
+        )
+        if choice is None:
+            self.log.append(f"{BOT_NAME} has no playable cards — skipping turn.")
+            nxt = next_alive_index(self.players, self.active)
+            if nxt is None:
+                self.phase = "game_over"
+                return
+            self.active = nxt
+            self.log.append(f"Turn — {self.players[self.active].name}")
+            self._turn_start_ticks()
+            return
+        card, target_idx, reason = choice
+        self.log.append(f"{BOT_NAME} thinks: {reason}")
+        self._execute_play(card, target_idx)
+
     def cancel_pending(self, token: str) -> None:
         seat = self.seat_by_token(token)
         if seat is None:
@@ -331,11 +398,45 @@ class MatchSession:
     def view_for(self, token: str | None) -> dict[str, Any]:
         seat = self.seat_by_token(token) if token else None
         settings = self.settings
+        seat_rows: list[dict[str, Any]] = []
+        if self.vs_bot:
+            human = self.seats.get(0)
+            seat_rows.append(
+                {
+                    "seat": 0,
+                    "name": human.name if human else None,
+                    "ready": human.ready if human else False,
+                    "crafted": len(human.deck) if human else 0,
+                    "filled": human is not None,
+                }
+            )
+            seat_rows.append(
+                {
+                    "seat": 1,
+                    "name": BOT_NAME,
+                    "ready": True,
+                    "crafted": settings.deck_size if self.phase != "lobby" else 0,
+                    "filled": True,
+                    "is_bot": True,
+                }
+            )
+        else:
+            for i in range(settings.player_count):
+                seat_rows.append(
+                    {
+                        "seat": i,
+                        "name": self.seats[i].name if i in self.seats else None,
+                        "ready": self.seats[i].ready if i in self.seats else False,
+                        "crafted": len(self.seats[i].deck) if i in self.seats else 0,
+                        "filled": i in self.seats,
+                    }
+                )
         payload: dict[str, Any] = {
             "code": self.code,
             "phase": self.phase,
             "is_host": bool(token and token == self.host_token),
             "your_seat": seat.seat if seat else None,
+            "vs_bot": self.vs_bot,
             "settings": {
                 "player_count": settings.player_count,
                 "starting_hp": settings.starting_hp,
@@ -343,17 +444,9 @@ class MatchSession:
                 "deck_size": settings.deck_size,
                 "allow_duplicates": allows_duplicate_archetypes(settings.deck_size),
                 "mercy_heal": FIFTH_CARD_HEAL,
+                "vs_bot": self.vs_bot,
             },
-            "seats": [
-                {
-                    "seat": i,
-                    "name": self.seats[i].name if i in self.seats else None,
-                    "ready": self.seats[i].ready if i in self.seats else False,
-                    "crafted": len(self.seats[i].deck) if i in self.seats else 0,
-                    "filled": i in self.seats,
-                }
-                for i in range(settings.player_count)
-            ],
+            "seats": seat_rows,
             "log": self.log[-40:],
             "winner": self.winner_name,
             "active": self.active if self.phase in ("play", "game_over") else None,
@@ -379,6 +472,7 @@ class MatchSession:
                         "poisoned": p.poisoned,
                         "hand_count": len(p.hand),
                         "is_active": i == self.active,
+                        "is_bot": p.is_bot,
                     }
                 )
             if seat is not None and seat.seat < len(self.players):
@@ -399,7 +493,7 @@ class MatchSession:
                 "ready": seat.ready,
                 "done_craftable": crafted >= need,
                 "budget_full": pp,
-                "can_steal": can_add_steal_card(seat.deck, pp),
+                "can_steal": (not self.vs_bot) and can_add_steal_card(seat.deck, pp),
                 "can_heavy": can_add_heavy_hit_card(seat.deck),
                 "can_shield": can_add_shield_card(seat.deck, pp),
                 "can_poison": can_add_poison_card(seat.deck),

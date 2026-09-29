@@ -3,94 +3,135 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-  <title>Crash Out — Browser</title>
+  <title>Crash Out</title>
   <link rel="stylesheet" href="/static/style.css" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet" />
+  <style>
+    @font-face {
+      font-family: "CrashOutGame";
+      src: url("/api/font") format("truetype");
+      font-display: swap;
+    }
+  </style>
 </head>
 <body>
   <div id="app">
-    <header class="top">
-      <h1>CRASH OUT</h1>
-      <p class="sub" id="connection">Connecting…</p>
-    </header>
-
+    <!-- SETUP (same options as window hotseat) -->
     <section id="screen-home" class="screen">
-      <label>Your name
-        <input id="name" maxlength="20" placeholder="Player" value="Player" />
-      </label>
-      <div class="row">
-        <button id="btn-create" class="btn primary">Create room (host)</button>
+      <h1>CRASH OUT</h1>
+      <p class="lede">
+        Craft cards, then play vs bot or with friends on the same WiFi.
+        Multiplayer shuffles craftable cards between players (Mercy / Steal / Heavy Hit / Shield / Poison stay with their owner).
+      </p>
+      <p class="sub" id="connection">Connecting…</p>
+
+      <div class="setup-form panel">
+        <div class="form-row">
+          <span class="form-label">Your name</span>
+          <input id="name" maxlength="20" value="Player" />
+        </div>
+        <div class="form-row">
+          <span class="form-label">Match size</span>
+          <select id="match-size">
+            <option value="1">1 — vs bot</option>
+            <option value="2" selected>2 players</option>
+            <option value="3">3 players</option>
+            <option value="4">4 players</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <span class="form-label">Starting HP</span>
+          <input type="number" id="setup-hp" min="1" max="9999" value="500" />
+        </div>
+        <div class="form-row">
+          <span class="form-label">Power points / card</span>
+          <input type="number" id="setup-pp" min="1" max="999" value="100" />
+        </div>
+        <div class="form-row">
+          <span class="form-label">Max cards / deck</span>
+          <div class="deck-stepper">
+            <button type="button" id="deck-down" class="btn small">−</button>
+            <span id="setup-deck-label" class="deck-val">10</span>
+            <button type="button" id="deck-up" class="btn small">+</button>
+          </div>
+          <input type="hidden" id="setup-deck" value="10" />
+        </div>
+        <p id="setup-rules" class="hint rules"></p>
       </div>
-      <div class="row join-row">
-        <input id="room-code" maxlength="8" placeholder="ROOM" class="code" />
-        <button id="btn-join" class="btn">Join room</button>
+
+      <div class="theme-row panel">
+        <span class="form-label">Theme</span>
+        <select id="theme-pick"></select>
+        <button type="button" id="btn-theme-random" class="art-btn" data-label="Random" data-palette="steal"></button>
+        <p id="theme-label" class="hint"></p>
       </div>
-      <p class="hint" id="host-hint"></p>
+
+      <div class="network panel">
+        <p class="network-title">Multiplayer (same WiFi)</p>
+        <button id="btn-host" class="art-btn wide" data-label="Host room" data-palette="selected"></button>
+        <div class="join-row">
+          <input id="room-code" maxlength="8" placeholder="ROOM CODE" class="code" />
+          <button id="btn-join" class="art-btn" data-label="Join" data-palette="normal"></button>
+        </div>
+        <p class="hint" id="host-hint"></p>
+      </div>
     </section>
 
+    <!-- LOBBY -->
     <section id="screen-lobby" class="screen hidden">
-      <h2>Lobby <span id="lobby-code" class="code-badge"></span></h2>
+      <h1>CRASH OUT</h1>
+      <p class="banner">Room <span id="lobby-code" class="code-badge"></span></p>
       <ul id="seat-list" class="seat-list"></ul>
-      <div id="host-settings" class="panel hidden">
-        <h3>Host settings</h3>
-        <label>Players
-          <input type="number" id="set-players" min="2" max="4" value="2" />
-        </label>
-        <label>Starting HP
-          <input type="number" id="set-hp" min="1" max="9999" value="500" />
-        </label>
-        <label>Power points
-          <input type="number" id="set-pp" min="1" max="999" value="100" />
-        </label>
-        <label>Deck size
-          <input type="number" id="set-deck" min="3" max="20" value="10" />
-        </label>
-        <button id="btn-save-settings" class="btn">Save settings</button>
-        <button id="btn-start-craft" class="btn primary">Start Card Lab</button>
-      </div>
-      <p class="hint" id="lobby-hint">Waiting for host…</p>
+      <p class="hint" id="lobby-hint"></p>
+      <button id="btn-start-craft" class="art-btn wide hidden" data-label="Start Card Lab" data-palette="selected"></button>
     </section>
 
+    <!-- CARD LAB -->
     <section id="screen-craft" class="screen hidden">
-      <h2>Card Lab <span id="craft-slot"></span></h2>
+      <h1>Card Lab</h1>
+      <p class="banner" id="craft-slot"></p>
       <p id="craft-rules" class="hint"></p>
-      <div class="panel" id="craft-form">
-        <label>Damage (rest = heal)
+      <div class="panel craft-layout" id="craft-form">
+        <div class="unique-picks" id="unique-picks">
+          <canvas class="unique-card" data-u="steal" id="pick-steal" width="120" height="168"></canvas>
+          <canvas class="unique-card" data-u="heavy" id="pick-heavy" width="120" height="168"></canvas>
+          <canvas class="unique-card" data-u="shield" id="pick-shield" width="120" height="168"></canvas>
+          <canvas class="unique-card" data-u="poison" id="pick-poison" width="120" height="168"></canvas>
+        </div>
+        <label class="slider-label">Damage (rest = heal)
           <input type="range" id="dmg-slider" min="0" max="100" value="50" />
         </label>
         <p id="split-preview" class="preview"></p>
-        <div class="unique-row">
-          <label class="chk"><input type="checkbox" id="u-steal" /> Steal</label>
-          <label class="chk"><input type="checkbox" id="u-heavy" /> Heavy Hit</label>
-          <label class="chk"><input type="checkbox" id="u-shield" /> Shield</label>
-          <label class="chk"><input type="checkbox" id="u-poison" /> Poison</label>
-        </div>
-        <button id="btn-craft" class="btn primary">Craft card</button>
-        <button id="btn-finish-craft" class="btn hidden">Finish (add Mercy) &amp; Ready</button>
+        <button id="btn-craft" class="art-btn wide" data-label="Craft card" data-palette="selected"></button>
+        <button id="btn-finish-craft" class="art-btn wide hidden" data-label="Finish Mercy" data-palette="heal"></button>
       </div>
-      <div id="craft-deck" class="card-row"></div>
+      <div id="craft-deck" class="hand two-row"></div>
       <p id="craft-waiting" class="hint hidden">Waiting for other players…</p>
     </section>
 
+    <!-- PLAY -->
     <section id="screen-play" class="screen hidden">
+      <h1>CRASH OUT</h1>
       <div id="hud" class="hud"></div>
       <p id="turn-banner" class="banner"></p>
-      <div id="hand" class="hand"></div>
+      <div id="hand" class="hand two-row"></div>
       <div id="targets" class="targets hidden"></div>
-      <button id="btn-cancel-target" class="btn hidden">Cancel</button>
-      <div id="play-log" class="log"></div>
+      <button id="btn-cancel-target" class="art-btn hidden" data-label="Cancel" data-palette="heavy_hit"></button>
+      <details class="log-box">
+        <summary>Log</summary>
+        <div id="play-log" class="log"></div>
+      </details>
     </section>
 
+    <!-- GAME OVER -->
     <section id="screen-over" class="screen hidden">
-      <h2 id="over-title">Game over</h2>
-      <p class="hint">Refresh to create or join a new room.</p>
+      <h1 id="over-title">Game over</h1>
+      <p class="hint">Refresh the page for a new match.</p>
       <div id="over-log" class="log"></div>
     </section>
 
     <p id="toast" class="toast hidden"></p>
   </div>
+  <script src="/static/pixel.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

@@ -2,14 +2,34 @@
 
 from __future__ import annotations
 
+import asyncio
 import socket
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import Body, FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from CrashOut_Resources import (
+    DECK_SIZE,
+    DEFAULT_POWER_POINTS,
+    DEFAULT_STARTING_HP,
+    MatchSettings,
+    PLAYER_COUNT_MAX,
+    clamp_deck_size,
+)
+from crash_out_pixel_bg import wallpaper_png_bytes
+from crash_out_themes import (
+    DEFAULT_FONT_PATH,
+    active_theme,
+    apply_theme_by_name,
+    randomize_theme,
+    reset_theme,
+    restore_theme_preference,
+    theme_names,
+    theme_to_dict,
+)
 from server.session import MatchSession
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -19,6 +39,11 @@ app = FastAPI(title="Crash Out Browser")
 rooms: dict[str, MatchSession] = {}
 # room_code -> set of websockets
 subscribers: dict[str, set[WebSocket]] = {}
+
+
+@app.on_event("startup")
+def _on_startup() -> None:
+    restore_theme_preference()
 
 
 def lan_ip() -> str:
@@ -33,6 +58,55 @@ def lan_ip() -> str:
 @app.get("/api/host-info")
 def host_info() -> dict[str, Any]:
     return {"lan_ip": lan_ip(), "hint": "Others on WiFi open http://<lan_ip>:8765"}
+
+
+def _theme_payload() -> dict[str, Any]:
+    theme = active_theme()
+    return {
+        "theme": theme_to_dict(theme),
+        "names": theme_names(),
+    }
+
+
+@app.get("/api/theme")
+def get_theme() -> dict[str, Any]:
+    return _theme_payload()
+
+
+@app.post("/api/theme")
+def post_theme(body: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    action = str(body.get("action") or "").strip().lower()
+    if action == "random":
+        randomize_theme()
+    elif action == "reset":
+        reset_theme()
+    elif action == "pick":
+        apply_theme_by_name(str(body.get("name") or ""))
+    return _theme_payload()
+
+
+@app.get("/api/wallpaper")
+def wallpaper(w: int = 960, h: int = 700, tint: str | None = None) -> Response:
+    theme = active_theme()
+    try:
+        png = wallpaper_png_bytes(
+            theme, min(960, max(64, w)), min(540, max(64, h)), tint=tint
+        )
+    except Exception:
+        return Response(status_code=204)
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.get("/api/font")
+def font_file() -> FileResponse:
+    path = active_theme().font_path or DEFAULT_FONT_PATH
+    if path is None or not Path(path).exists():
+        path = DEFAULT_FONT_PATH
+    return FileResponse(path, media_type="font/ttf")
 
 
 @app.get("/")
@@ -59,6 +133,18 @@ async def _broadcast(code: str) -> None:
         subscribers.get(code, set()).discard(ws)
 
 
+async def _run_bot_turns(code: str) -> None:
+    room = rooms.get(code)
+    if room is None:
+        return
+    safety = 0
+    while room.bot_should_act() and safety < 24:
+        safety += 1
+        await asyncio.sleep(0.65)
+        room.run_one_bot_turn()
+        await _broadcast(code)
+
+
 @app.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
@@ -71,6 +157,23 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             try:
                 if action == "create":
                     room = MatchSession()
+                    player_count = int(msg.get("player_count") or 2)
+                    vs_bot = bool(msg.get("vs_bot")) or player_count == 1
+                    if vs_bot:
+                        player_count = 1
+                    starting_hp = int(msg.get("starting_hp") or DEFAULT_STARTING_HP)
+                    power_points = int(msg.get("power_points") or DEFAULT_POWER_POINTS)
+                    deck_size = clamp_deck_size(int(msg.get("deck_size") or DECK_SIZE))
+                    if player_count < 1:
+                        player_count = 1
+                    if player_count > PLAYER_COUNT_MAX:
+                        player_count = PLAYER_COUNT_MAX
+                    room.settings = MatchSettings(
+                        player_count,
+                        starting_hp,
+                        power_points,
+                        deck_size,
+                    )
                     rooms[room.code] = room
                     room_code = room.code
                     subscribers.setdefault(room.code, set()).add(websocket)
@@ -78,8 +181,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     seat = room.join(name, preferred_seat=0)
                     token = seat.token
                     room.host_token = token
-                    # Creator is host
                     websocket.player_token = token  # type: ignore[attr-defined]
+                    # Vs bot: skip waiting — go straight into Card Lab like window mode.
+                    if room.vs_bot:
+                        room.start_craft(room.host_token)
                     await websocket.send_json(
                         {
                             "type": "joined",
@@ -98,6 +203,8 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     room = rooms.get(code)
                     if room is None:
                         raise ValueError("Room not found. Check the code.")
+                    if room.vs_bot:
+                        raise RuntimeError("That room is vs bot — create your own.")
                     room_code = code
                     subscribers.setdefault(code, set()).add(websocket)
                     seat = room.join(str(msg.get("name") or "Player"))
@@ -155,6 +262,8 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     raise ValueError(f"Unknown action: {action}")
 
                 await _broadcast(room_code)
+                if action in ("finish_craft", "choose_target"):
+                    await _run_bot_turns(room_code)
             except Exception as exc:
                 await websocket.send_json({"type": "error", "message": str(exc)})
     except WebSocketDisconnect:

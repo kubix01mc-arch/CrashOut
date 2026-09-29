@@ -6,6 +6,16 @@
   let token = null;
   let hostToken = null;
   let state = null;
+  let uniquePick = null;
+  let deckSize = 10;
+  let theme = null;
+
+  const UNIQUE_META = {
+    steal: { label: "Steal", palette: "steal" },
+    heavy: { label: "Heavy Hit", palette: "heavy_hit" },
+    shield: { label: "Shield", palette: "selected" },
+    poison: { label: "Poison", palette: "poison" },
+  };
 
   const $ = (id) => document.getElementById(id);
   const screens = ["home", "lobby", "craft", "play", "over"];
@@ -32,11 +42,172 @@
     ws.send(JSON.stringify(payload));
   }
 
+  function hudChipSize(player) {
+    const ref = Math.max(Number(player.max_hp) || 1, 1);
+    let factor = 0.78 + 0.2 * Math.log10(ref + 20);
+    factor = Math.max(0.82, Math.min(1.7, factor));
+    const hpText = player.alive ? `${player.hp}/${player.max_hp} HP` : "OUT";
+    const charW = Math.max(8, Math.round(9.5 * factor));
+    let width = Math.max(Math.round(152 * factor), hpText.length * charW + 28);
+    let height = Math.max(Math.round(72 * factor), Math.round(64 * factor));
+    if (player.alive && (player.shield || player.poisoned)) {
+      height = Math.max(height, Math.round(80 * factor));
+    }
+    return [width - (width % 2), height - (height % 2)];
+  }
+
+  function reloadGameFont(family) {
+    const name = family || "CrashOutGame";
+    let el = document.getElementById("crash-font");
+    if (el) el.remove();
+    el = document.createElement("style");
+    el.id = "crash-font";
+    el.textContent = `
+      @font-face {
+        font-family: "${name}";
+        src: url("/api/font?t=${Date.now()}") format("truetype");
+        font-display: swap;
+      }
+      @font-face {
+        font-family: "CrashOutGame";
+        src: url("/api/font?t=${Date.now()}") format("truetype");
+        font-display: swap;
+      }
+    `;
+    document.head.appendChild(el);
+    return document.fonts.load(`16px "${name}"`).catch(() => {});
+  }
+
+  function applyWallpaper() {
+    const w = Math.min(640, Math.max(320, Math.floor(window.innerWidth / 2)));
+    const h = Math.min(360, Math.max(180, Math.floor(window.innerHeight / 2)));
+    document.body.style.backgroundImage = `url("/api/wallpaper?w=${w}&h=${h}&t=${Date.now()}")`;
+  }
+
+  function ensureCanvas(host, w, h) {
+    let c = host.tagName === "CANVAS" ? host : host.querySelector("canvas");
+    if (!c) {
+      c = document.createElement("canvas");
+      host.appendChild(c);
+    }
+    if (c.width !== w) c.width = w;
+    if (c.height !== h) c.height = h;
+    return c;
+  }
+
+  function paintArtButton(btn) {
+    if (!theme || !window.PixelArt) return;
+    const rect = btn.getBoundingClientRect();
+    const w = Math.max(120, Math.floor(rect.width) || 200);
+    const h = Math.max(44, Math.floor(rect.height) || 52);
+    const canvas = ensureCanvas(btn, w, h);
+    PixelArt.drawArtButton(
+      canvas,
+      theme,
+      btn.dataset.palette || "normal",
+      btn.dataset.label || "",
+      btn.matches(":hover")
+    );
+  }
+
+  function paintChrome() {
+    if (!theme || !window.PixelArt) return;
+    document.querySelectorAll(".art-btn").forEach(paintArtButton);
+    paintUniquePicks();
+  }
+
+  function paintUniquePicks() {
+    if (!theme || !window.PixelArt) return;
+    const craft = state?.craft;
+    const can = {
+      steal: craft ? !!craft.can_steal : true,
+      heavy: craft ? !!craft.can_heavy : true,
+      shield: craft ? !!craft.can_shield : true,
+      poison: craft ? !!craft.can_poison : true,
+    };
+    Object.keys(UNIQUE_META).forEach((key) => {
+      const canvas = $(`pick-${key}`);
+      if (!canvas) return;
+      const locked = craft ? !can[key] : false;
+      canvas.classList.toggle("disabled", locked);
+      canvas.classList.toggle("on", uniquePick === key);
+      PixelArt.drawUniquePick(
+        canvas,
+        theme,
+        UNIQUE_META[key].palette,
+        UNIQUE_META[key].label,
+        uniquePick === key,
+        locked,
+        canvas.matches(":hover")
+      );
+    });
+  }
+
+  function applyThemePayload(data) {
+    theme = data.theme;
+    if (window.PixelArt) PixelArt.applyThemeCss(theme);
+    const sel = $("theme-pick");
+    const names = data.names || [];
+    const current = sel.value;
+    if (sel.options.length !== names.length) {
+      sel.innerHTML = names
+        .map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`)
+        .join("");
+    }
+    if (names.includes(theme.name)) sel.value = theme.name;
+    else if (current) sel.value = current;
+    $("theme-label").textContent = theme.name;
+    applyWallpaper();
+    reloadGameFont(theme.font_family).then(() => {
+      paintChrome();
+      if (state) render();
+    });
+    paintChrome();
+  }
+
+  async function loadTheme() {
+    const res = await fetch("/api/theme");
+    applyThemePayload(await res.json());
+  }
+
+  async function setTheme(action, name) {
+    const res = await fetch("/api/theme", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, name }),
+    });
+    applyThemePayload(await res.json());
+  }
+
+  function setupRulesText() {
+    const n = deckSize;
+    const lines = [
+      `Max HP = 2× starting. Last card (${n}) = Mercy (25 heal any target).`,
+      `Deck size 3–20.`,
+    ];
+    if (n >= 12) {
+      lines.push("12+ cards: duplicate types allowed (uniques still one each).");
+    } else {
+      lines.push("Under 12 cards: each type is unique (duplicates unlock at 12+).");
+    }
+    const match = Number($("match-size").value);
+    if (match === 1) {
+      lines.push("Vs bot: Steal is disabled.");
+    }
+    $("setup-rules").textContent = lines.join("\n");
+  }
+
+  function syncDeckLabel() {
+    $("setup-deck").value = String(deckSize);
+    $("setup-deck-label").textContent = String(deckSize);
+    setupRulesText();
+  }
+
   function connect() {
     $("connection").textContent = "Connecting…";
     ws = new WebSocket(wsUrl);
     ws.onopen = () => {
-      $("connection").textContent = "Connected — WiFi / browser mode";
+      $("connection").textContent = "Ready";
     };
     ws.onclose = () => {
       $("connection").textContent = "Disconnected — refresh to retry";
@@ -62,47 +233,19 @@
     };
   }
 
-  function cardClass(c) {
-    if (c.heal_any || (c.heal > c.damage && !c.steals && !c.heavy_hit && !c.poisons && !c.shields))
-      return "heal";
-    if (c.poisons) return "poison";
-    if (c.shields) return "shield";
-    if (c.heavy_hit) return "heavy";
-    if (c.steals) return "steal";
-    return "";
-  }
-
-  function cardStats(c) {
-    if (c.heal_any) return `HEAL\n${c.heal}`;
-    const d = c.display_damage ?? c.damage;
-    const h = c.display_heal ?? c.heal;
-    if (h <= d) return `${d}\nDMG`;
-    return `${h}\nHEAL`;
-  }
-
-  function cardDetail(c) {
-    if (c.heal_any) return "any target";
-    const bits = [];
-    const d = c.display_damage ?? c.damage;
-    const h = c.display_heal ?? c.heal;
-    if (h <= d && h > 0) bits.push(`+${h} heal`);
-    if (h > d && d > 0) bits.push(`+${d} dmg`);
-    if (c.steals) bits.push("steal");
-    if (c.heavy_hit) bits.push("heavy");
-    if (c.shields) bits.push("shield");
-    if (c.poisons) bits.push("poison");
-    if (c.cooling) bits.push("cooldown");
-    if (c.borrowed) bits.push("borrowed");
-    return bits.join(" · ");
-  }
-
   function renderCard(c, { playable } = {}) {
     const el = document.createElement("button");
     el.type = "button";
-    el.className = `card ${cardClass(c)}${c.cooling ? " cooling" : ""}`;
-    el.innerHTML = `<div class="name">${escapeHtml(c.name)}</div>
-      <div class="stats">${escapeHtml(cardStats(c))}</div>
-      <div class="detail">${escapeHtml(cardDetail(c))}</div>`;
+    el.className = "card-face";
+    const canvas = document.createElement("canvas");
+    canvas.width = 120;
+    canvas.height = 168;
+    el.appendChild(canvas);
+    if (theme && window.PixelArt) {
+      PixelArt.drawCardFace(canvas, theme, c, {});
+      el.onmouseenter = () => PixelArt.drawCardFace(canvas, theme, c, { hover: true });
+      el.onmouseleave = () => PixelArt.drawCardFace(canvas, theme, c, {});
+    }
     if (playable && !c.cooling) {
       el.onclick = () => send({ action: "play_card", card_id: c.id });
     } else {
@@ -115,25 +258,15 @@
     return String(s)
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-  }
-
-  function uniqueExclusive(changedId) {
-    const ids = ["u-steal", "u-heavy", "u-shield", "u-poison"];
-    if (!$(changedId).checked) return;
-    ids.forEach((id) => {
-      if (id !== changedId) $(id).checked = false;
-    });
-    if (changedId === "u-shield") $("dmg-slider").value = "0";
-    if (changedId === "u-poison") $("dmg-slider").value = $("dmg-slider").max;
-    updateSplitPreview();
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
   }
 
   function craftBudget() {
     if (!state?.craft) return state?.settings?.power_points || 100;
     const pp = state.settings.power_points;
-    if ($("u-steal").checked) return state.craft.budget_steal;
-    if ($("u-shield").checked) return state.craft.budget_shield;
+    if (uniquePick === "steal") return state.craft.budget_steal;
+    if (uniquePick === "shield") return state.craft.budget_shield;
     return pp;
   }
 
@@ -146,11 +279,11 @@
       dmg = budget;
       slider.value = String(budget);
     }
-    if ($("u-shield").checked) {
+    if (uniquePick === "shield") {
       dmg = 0;
       slider.value = "0";
       slider.disabled = true;
-    } else if ($("u-poison").checked) {
+    } else if (uniquePick === "poison") {
       dmg = budget;
       slider.value = String(budget);
       slider.disabled = true;
@@ -161,9 +294,36 @@
     $("split-preview").textContent = `${dmg} damage / ${heal} heal (budget ${budget})`;
   }
 
+  function syncUniquePicks(craft) {
+    const can = {
+      steal: !!craft.can_steal,
+      heavy: !!craft.can_heavy,
+      shield: !!craft.can_shield,
+      poison: !!craft.can_poison,
+    };
+    Object.keys(UNIQUE_META).forEach((key) => {
+      if (!can[key] && uniquePick === key) uniquePick = null;
+    });
+    paintUniquePicks();
+  }
+
+  function hostPayload() {
+    const count = Number($("match-size").value);
+    return {
+      action: "create",
+      name: $("name").value || "Player",
+      vs_bot: count === 1,
+      player_count: count,
+      starting_hp: Number($("setup-hp").value),
+      power_points: Number($("setup-pp").value),
+      deck_size: deckSize,
+    };
+  }
+
   function render() {
     if (!state) {
       show("home");
+      paintChrome();
       return;
     }
     if (state.phase === "lobby") {
@@ -173,22 +333,25 @@
       list.innerHTML = "";
       state.seats.forEach((s) => {
         const li = document.createElement("li");
-        li.innerHTML = `<span>Seat ${s.seat + 1}</span><span>${
-          s.filled ? escapeHtml(s.name) : "—"
-        }</span>`;
+        const label = s.is_bot
+          ? `${escapeHtml(s.name || "bot")} (AI)`
+          : s.filled
+            ? escapeHtml(s.name)
+            : "waiting…";
+        li.innerHTML = `<span>Seat ${s.seat + 1}</span><span>${label}</span>`;
         list.appendChild(li);
       });
-      const hostPanel = $("host-settings");
-      hostPanel.classList.toggle("hidden", !hostToken);
-      if (hostToken) {
-        $("set-players").value = state.settings.player_count;
-        $("set-hp").value = state.settings.starting_hp;
-        $("set-pp").value = state.settings.power_points;
-        $("set-deck").value = state.settings.deck_size;
-        $("lobby-hint").textContent = "Share the room code with friends on the same WiFi.";
+      const startBtn = $("btn-start-craft");
+      startBtn.classList.toggle("hidden", !hostToken);
+      if (state.vs_bot) {
+        $("lobby-hint").textContent = "Vs bot — press Start Card Lab when ready.";
+      } else if (hostToken) {
+        $("lobby-hint").textContent =
+          "Share the room code. When everyone has joined, start Card Lab.";
       } else {
         $("lobby-hint").textContent = "Waiting for host to start Card Lab…";
       }
+      paintChrome();
       return;
     }
 
@@ -198,21 +361,34 @@
       if (!c) return;
       $("craft-slot").textContent = c.ready
         ? "READY"
-        : `Card ${c.slot}/${state.settings.deck_size}`;
-      $("craft-rules").textContent = state.settings.allow_duplicates
-        ? "12+ deck: duplicate types allowed. Uniques still one each."
-        : "Under 12 cards: each type unique. Uniques one each.";
-      $("craft-form").classList.toggle("hidden", c.ready || c.done_craftable);
+        : `Card ${c.slot} / ${state.settings.deck_size}`;
+      $("craft-rules").textContent = [
+        state.settings.allow_duplicates
+          ? "12+ deck: duplicate types allowed. Uniques still one each."
+          : "Under 12 cards: each type unique. Uniques one each.",
+        state.vs_bot ? "Vs bot: Steal disabled." : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      $("craft-form").classList.toggle("hidden", !!c.ready);
       $("btn-finish-craft").classList.toggle("hidden", c.ready || !c.done_craftable);
+      $("btn-craft").classList.toggle("hidden", c.ready || c.done_craftable);
+      $("unique-picks").classList.toggle("hidden", !!(c.ready || c.done_craftable));
+      const sliderLabel = $("dmg-slider").closest("label");
+      if (sliderLabel) {
+        sliderLabel.classList.toggle("hidden", !!(c.ready || c.done_craftable));
+      }
+      $("split-preview").classList.toggle("hidden", !!(c.ready || c.done_craftable));
       $("craft-waiting").classList.toggle("hidden", !c.ready);
-      $("u-steal").disabled = !c.can_steal;
-      $("u-heavy").disabled = !c.can_heavy;
-      $("u-shield").disabled = !c.can_shield;
-      $("u-poison").disabled = !c.can_poison;
+      $("craft-waiting").textContent = state.vs_bot
+        ? "Starting match vs bot…"
+        : "Waiting for other players…";
+      syncUniquePicks(c);
       updateSplitPreview();
       const deck = $("craft-deck");
       deck.innerHTML = "";
       (state.your_deck || []).forEach((card) => deck.appendChild(renderCard(card)));
+      paintChrome();
       return;
     }
 
@@ -221,27 +397,27 @@
       const hud = $("hud");
       hud.innerHTML = "";
       state.players.forEach((p) => {
-        const chip = document.createElement("div");
-        chip.className = `chip${p.is_active ? " active" : ""}${p.alive ? "" : " dead"}`;
-        let status = "";
-        if (p.shield) status = "SHIELD";
-        else if (p.poisoned) status = "POISON";
-        chip.innerHTML = `<div>${escapeHtml(p.name)}</div>
-          <div class="hp">${p.alive ? `${p.hp}/${p.max_hp}` : "OUT"}</div>
-          <div class="status">${status}</div>`;
-        hud.appendChild(chip);
+        const [w, h] = hudChipSize(p);
+        const canvas = document.createElement("canvas");
+        canvas.className = "hud-chip";
+        canvas.width = w;
+        canvas.height = h;
+        if (theme && window.PixelArt) PixelArt.drawHudChip(canvas, theme, p);
+        hud.appendChild(canvas);
       });
       const me = state.your_seat;
       const myTurn = me === state.active;
       $("turn-banner").textContent = myTurn
         ? state.pending_card_id
           ? "Choose a target"
-          : "Your turn — pick a card"
-        : `Waiting for ${state.players[state.active]?.name || "…"}`;
+          : `Turn — ${state.players[me]?.name || "you"}`
+        : `Turn — ${state.players[state.active]?.name || "…"}`;
       const hand = $("hand");
       hand.innerHTML = "";
       (state.your_hand || []).forEach((card) => {
-        hand.appendChild(renderCard(card, { playable: myTurn && !state.pending_card_id }));
+        hand.appendChild(
+          renderCard(card, { playable: myTurn && !state.pending_card_id })
+        );
       });
       const targets = $("targets");
       const cancel = $("btn-cancel-target");
@@ -253,8 +429,9 @@
           if (!p.alive) return;
           const b = document.createElement("button");
           b.type = "button";
-          b.className = "target";
-          b.textContent = p.seat === me ? `${p.name} (you)` : p.name;
+          b.className = "target art-btn";
+          b.dataset.label = p.seat === me ? `${p.name} (you)` : p.name;
+          b.dataset.palette = p.seat === me ? "heal" : "normal";
           b.onclick = () => send({ action: "choose_target", target: p.seat });
           targets.appendChild(b);
         });
@@ -264,6 +441,7 @@
         targets.innerHTML = "";
       }
       $("play-log").textContent = (state.log || []).join("\n");
+      paintChrome();
       return;
     }
 
@@ -273,12 +451,25 @@
         ? `${state.winner} wins!`
         : "Game over";
       $("over-log").textContent = (state.log || []).join("\n");
+      if (theme) {
+        document.body.style.backgroundColor = state.winner
+          ? theme.win_bg
+          : theme.lose_bg;
+      }
     }
   }
 
-  $("btn-create").onclick = () => {
-    send({ action: "create", name: $("name").value || "Host" });
+  $("deck-down").onclick = () => {
+    deckSize = Math.max(3, deckSize - 1);
+    syncDeckLabel();
   };
+  $("deck-up").onclick = () => {
+    deckSize = Math.min(20, deckSize + 1);
+    syncDeckLabel();
+  };
+  $("match-size").onchange = setupRulesText;
+
+  $("btn-host").onclick = () => send(hostPayload());
   $("btn-join").onclick = () => {
     send({
       action: "join",
@@ -286,48 +477,63 @@
       code: ($("room-code").value || "").trim().toUpperCase(),
     });
   };
-  $("btn-save-settings").onclick = () => {
-    send({
-      action: "set_settings",
-      host_token: hostToken,
-      player_count: Number($("set-players").value),
-      starting_hp: Number($("set-hp").value),
-      power_points: Number($("set-pp").value),
-      deck_size: Number($("set-deck").value),
-    });
-  };
   $("btn-start-craft").onclick = () => {
     send({ action: "start_craft", host_token: hostToken });
   };
-  ["u-steal", "u-heavy", "u-shield", "u-poison"].forEach((id) => {
-    $(id).onchange = () => uniqueExclusive(id);
+
+  ["steal", "heavy", "shield", "poison"].forEach((key) => {
+    const canvas = $(`pick-${key}`);
+    canvas.onclick = () => {
+      if (canvas.classList.contains("disabled")) return;
+      uniquePick = uniquePick === key ? null : key;
+      if (uniquePick === "shield") $("dmg-slider").value = "0";
+      if (uniquePick === "poison") $("dmg-slider").value = $("dmg-slider").max;
+      if (state?.craft) syncUniquePicks(state.craft);
+      else paintUniquePicks();
+      updateSplitPreview();
+    };
+    canvas.onmouseenter = () => paintUniquePicks();
+    canvas.onmouseleave = () => paintUniquePicks();
   });
+
   $("dmg-slider").oninput = updateSplitPreview;
   $("btn-craft").onclick = () => {
     send({
       action: "craft",
       damage: Number($("dmg-slider").value),
-      steals: $("u-steal").checked,
-      heavy_hit: $("u-heavy").checked,
-      shields: $("u-shield").checked,
-      poisons: $("u-poison").checked,
+      steals: uniquePick === "steal",
+      heavy_hit: uniquePick === "heavy",
+      shields: uniquePick === "shield",
+      poisons: uniquePick === "poison",
     });
-    $("u-steal").checked = false;
-    $("u-heavy").checked = false;
-    $("u-shield").checked = false;
-    $("u-poison").checked = false;
+    uniquePick = null;
   };
   $("btn-finish-craft").onclick = () => send({ action: "finish_craft" });
   $("btn-cancel-target").onclick = () => send({ action: "cancel_pending" });
+
+  $("theme-pick").onchange = () => setTheme("pick", $("theme-pick").value);
+  $("btn-theme-random").onclick = () => setTheme("random");
+
+  document.querySelectorAll(".art-btn").forEach((btn) => {
+    btn.addEventListener("mouseenter", () => paintArtButton(btn));
+    btn.addEventListener("mouseleave", () => paintArtButton(btn));
+  });
+
+  window.addEventListener("resize", () => {
+    applyWallpaper();
+    paintChrome();
+  });
 
   fetch("/api/host-info")
     .then((r) => r.json())
     .then((info) => {
       $("host-hint").textContent =
-        `Same WiFi friends open http://${info.lan_ip}:8765 and join your room code.`;
+        `Friends open http://${info.lan_ip}:8765 and enter your room code.`;
     })
     .catch(() => {});
 
+  syncDeckLabel();
+  loadTheme().catch(() => toast("Could not load theme"));
   connect();
   show("home");
 })();

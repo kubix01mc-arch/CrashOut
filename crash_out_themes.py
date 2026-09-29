@@ -4,18 +4,57 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import random
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 CardStyle = Literal[
-    "pixel", "neon", "stone", "ice", "lava", "arcade", "gold", "circuit", "shadow"
+    "pixel",
+    "neon",
+    "stone",
+    "ice",
+    "lava",
+    "arcade",
+    "gold",
+    "circuit",
+    "shadow",
+    "crimson",
+    "ocean",
+    "sakura",
+    "jazz",
+    "toxic",
+    "solar",
+    "aurora",
+    "ruins",
+    "void",
+    "candy",
+    "village",
 ]
 
 CARD_STYLES: tuple[CardStyle, ...] = (
-    "pixel", "neon", "stone", "ice", "lava", "arcade", "gold", "circuit", "shadow",
+    "pixel",
+    "neon",
+    "stone",
+    "ice",
+    "lava",
+    "arcade",
+    "gold",
+    "circuit",
+    "shadow",
+    "crimson",
+    "ocean",
+    "sakura",
+    "jazz",
+    "toxic",
+    "solar",
+    "aurora",
+    "ruins",
+    "void",
+    "candy",
+    "village",
 )
 
 FR_PRIVATE = 0x10
@@ -23,10 +62,15 @@ HWND_BROADCAST = 0xFFFF
 WM_FONTCHANGE = 0x001D
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+PREFS_PATH = PROJECT_ROOT / "user_prefs.json"
 DEFAULT_FONT_PATH = (
     PROJECT_ROOT / "Minecraft-20230518T220806Z-001 (1)" / "Minecraft" / "arial.ttf"
 )
 FONT_DIR = PROJECT_ROOT / "Minecraft-20230518T220806Z-001 (1)" / "Minecraft"
+
+
+# Default poison palette (deep purple fill / violet accent / lilac text)
+DEFAULT_POISON_ART: tuple[str, str, str] = ("#2a1540", "#a855f7", "#f3e8ff")
 
 
 @dataclass(frozen=True)
@@ -39,6 +83,7 @@ class CardArt:
     steal: tuple[str, str, str]
     disabled: tuple[str, str, str]
     selected: tuple[str, str, str]
+    poison: tuple[str, str, str] = DEFAULT_POISON_ART
 
 
 @dataclass(frozen=True)
@@ -79,7 +124,8 @@ def _register_font_file(font_path: Path) -> None:
         return
     try:
         add_ex(str(font_path), FR_PRIVATE, None)
-        ctypes.windll.user32.SendMessageW(HWND_BROADCAST, WM_FONTCHANGE, 0, 0)
+        # Notify, don't wait — HWND_BROADCAST + SendMessageW can hang for minutes.
+        ctypes.windll.user32.SendNotifyMessageW(HWND_BROADCAST, WM_FONTCHANGE, 0, 0)
     except Exception:
         pass
 
@@ -238,6 +284,7 @@ def default_theme() -> GameTheme:
         steal=("#2e2240", "#c9a0dc", "#f3e6ff"),
         disabled=("#2a302c", "#6a736c", "#8a948c"),
         selected=("#3d5a45", "#f0c674", "#fff6d8"),
+        poison=("#2a1540", "#a855f7", "#f3e8ff"),
     )
     return _build_theme(
         name="Default",
@@ -537,6 +584,344 @@ def creative_theme_presets() -> list[GameTheme]:
         )
     )
 
+    presets.append(
+        _build_theme(
+            name="Crimson Colosseum",
+            font_path=DEFAULT_FONT_PATH if DEFAULT_FONT_PATH.exists() else None,
+            font_family="Minecraft",
+            screen_bg="#180808",
+            win_bg="#284818",
+            lose_bg="#701010",
+            title_fg="#ffb0a0",
+            body_fg="#e89080",
+            log_bg="#100404",
+            log_fg="#ff7060",
+            overlay_bg="#180808",
+            panel_bg="#301010",
+            panel_border="#ff5040",
+            target_bg="#301010",
+            cards=CardArt(
+                normal=("#401818", "#ff6040", "#ffe8e0"),
+                heal=("#183020", "#60c870", "#d8ffe0"),
+                heavy_hit=("#501010", "#ff3020", "#ffd8d0"),
+                steal=("#281830", "#c070e0", "#f0e0ff"),
+                disabled=("#281818", "#705050", "#988080"),
+                selected=("#502018", "#ffb060", "#fff0d8"),
+            ),
+            scale_hue=10 / 360,
+            card_style="crimson",
+            hud_active=("#502018", "#ffb060", "#fff0d8"),
+        )
+    )
+
+    presets.append(
+        _build_theme(
+            name="Deep Ocean",
+            font_path=DEFAULT_FONT_PATH if DEFAULT_FONT_PATH.exists() else None,
+            font_family="Minecraft",
+            screen_bg="#041018",
+            win_bg="#0a3848",
+            lose_bg="#381828",
+            title_fg="#a0e8ff",
+            body_fg="#70b8d8",
+            log_bg="#020810",
+            log_fg="#60c8f0",
+            overlay_bg="#041018",
+            panel_bg="#0a1828",
+            panel_border="#4090c0",
+            target_bg="#0a1828",
+            cards=CardArt(
+                normal=("#102838", "#4090c0", "#e0f4ff"),
+                heal=("#082830", "#40c0a0", "#d8fff0"),
+                heavy_hit=("#182838", "#60b0e0", "#e8f8ff"),
+                steal=("#101838", "#7080e0", "#e8ecff"),
+                disabled=("#101820", "#506070", "#7890a0"),
+                selected=("#183848", "#80d8ff", "#f0fcff"),
+            ),
+            scale_hue=210 / 360,
+            card_style="ocean",
+            hud_active=("#183848", "#80d8ff", "#f0fcff"),
+        )
+    )
+
+    presets.append(
+        _build_theme(
+            name="Sakura Garden",
+            font_path=DEFAULT_FONT_PATH if DEFAULT_FONT_PATH.exists() else None,
+            font_family="Minecraft",
+            screen_bg="#181018",
+            win_bg="#304830",
+            lose_bg="#582838",
+            title_fg="#ffd0e8",
+            body_fg="#e8b0c8",
+            log_bg="#100810",
+            log_fg="#f090b8",
+            overlay_bg="#181018",
+            panel_bg="#281820",
+            panel_border="#f080a8",
+            target_bg="#281820",
+            cards=CardArt(
+                normal=("#382028", "#f080a8", "#fff0f4"),
+                heal=("#203028", "#80d890", "#e8ffe8"),
+                heavy_hit=("#402028", "#e07090", "#ffe8ec"),
+                steal=("#282038", "#c090d8", "#f4ecff"),
+                disabled=("#282028", "#806878", "#a89098"),
+                selected=("#483030", "#ffb8d0", "#fff8fa"),
+            ),
+            scale_hue=330 / 360,
+            card_style="sakura",
+            hud_active=("#483030", "#ffb8d0", "#fff8fa"),
+        )
+    )
+
+    presets.append(
+        _build_theme(
+            name="Midnight Jazz",
+            font_path=DEFAULT_FONT_PATH if DEFAULT_FONT_PATH.exists() else None,
+            font_family="Minecraft",
+            screen_bg="#0c0818",
+            win_bg="#1a3830",
+            lose_bg="#481828",
+            title_fg="#e0c878",
+            body_fg="#b0a0c0",
+            log_bg="#080410",
+            log_fg="#c0a860",
+            overlay_bg="#0c0818",
+            panel_bg="#181028",
+            panel_border="#c0a060",
+            target_bg="#181028",
+            cards=CardArt(
+                normal=("#201830", "#c0a060", "#fff8e8"),
+                heal=("#182820", "#70b880", "#e0f0e0"),
+                heavy_hit=("#301820", "#d08070", "#ffe8e0"),
+                steal=("#201830", "#a080d0", "#f0e8ff"),
+                disabled=("#181820", "#605870", "#888898"),
+                selected=("#302040", "#e8c870", "#fffae8"),
+            ),
+            scale_hue=270 / 360,
+            card_style="jazz",
+            hud_active=("#302040", "#e8c870", "#fffae8"),
+        )
+    )
+
+    toxic_font = _theme_font("RobotoMono-Regular.ttf", "Minecraft")
+    presets.append(
+        _build_theme(
+            name="Toxic Wasteland",
+            font_path=toxic_font[0],
+            font_family=toxic_font[1],
+            screen_bg="#081008",
+            win_bg="#183820",
+            lose_bg="#402010",
+            title_fg="#a0ff60",
+            body_fg="#80c870",
+            log_bg="#040804",
+            log_fg="#80e840",
+            overlay_bg="#081008",
+            panel_bg="#101810",
+            panel_border="#70d040",
+            target_bg="#101810",
+            cards=CardArt(
+                normal=("#182018", "#70d040", "#e8ffd0"),
+                heal=("#102818", "#50e060", "#d8ffe0"),
+                heavy_hit=("#281808", "#e08030", "#ffe8c8"),
+                steal=("#181820", "#9080e0", "#ece8ff"),
+                disabled=("#141814", "#506050", "#708870"),
+                selected=("#203018", "#a0ff70", "#f0ffe8"),
+            ),
+            scale_hue=100 / 360,
+            card_style="toxic",
+            hud_active=("#203018", "#a0ff70", "#f0ffe8"),
+        )
+    )
+
+    presets.append(
+        _build_theme(
+            name="Solar Flare",
+            font_path=DEFAULT_FONT_PATH if DEFAULT_FONT_PATH.exists() else None,
+            font_family="Minecraft",
+            screen_bg="#180c04",
+            win_bg="#304818",
+            lose_bg="#681810",
+            title_fg="#ffe060",
+            body_fg="#f0c080",
+            log_bg="#100804",
+            log_fg="#ffb040",
+            overlay_bg="#180c04",
+            panel_bg="#281808",
+            panel_border="#ffa020",
+            target_bg="#281808",
+            cards=CardArt(
+                normal=("#402010", "#ffa020", "#fff8d8"),
+                heal=("#203018", "#70c060", "#e0ffe0"),
+                heavy_hit=("#502008", "#ff6020", "#ffe8c0"),
+                steal=("#301828", "#d080ff", "#f4e8ff"),
+                disabled=("#281810", "#806050", "#a89078"),
+                selected=("#503018", "#ffd040", "#ffffe8"),
+            ),
+            scale_hue=35 / 360,
+            card_style="solar",
+            hud_active=("#503018", "#ffd040", "#ffffe8"),
+        )
+    )
+
+    presets.append(
+        _build_theme(
+            name="Arctic Aurora",
+            font_path=DEFAULT_FONT_PATH if DEFAULT_FONT_PATH.exists() else None,
+            font_family="Minecraft",
+            screen_bg="#060818",
+            win_bg="#103838",
+            lose_bg="#382048",
+            title_fg="#80ffe8",
+            body_fg="#a0d8f0",
+            log_bg="#040410",
+            log_fg="#60f0d0",
+            overlay_bg="#060818",
+            panel_bg="#0c1020",
+            panel_border="#40e8c8",
+            target_bg="#0c1020",
+            cards=CardArt(
+                normal=("#101830", "#40e8c8", "#e8fffc"),
+                heal=("#082820", "#60e890", "#e0ffe8"),
+                heavy_hit=("#182030", "#80c0ff", "#f0f8ff"),
+                steal=("#141830", "#a080ff", "#f0ecff"),
+                disabled=("#101418", "#506870", "#789098"),
+                selected=("#183040", "#80ffe8", "#f0ffff"),
+            ),
+            scale_hue=175 / 360,
+            card_style="aurora",
+            hud_active=("#183040", "#80ffe8", "#f0ffff"),
+        )
+    )
+
+    presets.append(
+        _build_theme(
+            name="Ancient Ruins",
+            font_path=DEFAULT_FONT_PATH if DEFAULT_FONT_PATH.exists() else None,
+            font_family="Minecraft",
+            screen_bg="#161410",
+            win_bg="#303820",
+            lose_bg="#502818",
+            title_fg="#d8c8a8",
+            body_fg="#b0a890",
+            log_bg="#0c0a08",
+            log_fg="#c0b090",
+            overlay_bg="#161410",
+            panel_bg="#242018",
+            panel_border="#a89870",
+            target_bg="#242018",
+            cards=CardArt(
+                normal=("#383028", "#a89870", "#f4f0e0"),
+                heal=("#283028", "#789868", "#e4f0dc"),
+                heavy_hit=("#483020", "#c08858", "#ffe8d0"),
+                steal=("#302830", "#9888a8", "#f0ecf4"),
+                disabled=("#242018", "#686058", "#888078"),
+                selected=("#484030", "#e0c878", "#fffae8"),
+            ),
+            scale_hue=38 / 360,
+            card_style="ruins",
+            hud_active=("#484030", "#e0c878", "#fffae8"),
+        )
+    )
+
+    void_font = _theme_font("Creepster-Regular.ttf", "Minecraft")
+    presets.append(
+        _build_theme(
+            name="Digital Void",
+            font_path=void_font[0],
+            font_family=void_font[1],
+            screen_bg="#020204",
+            win_bg="#102820",
+            lose_bg="#300818",
+            title_fg="#8080ff",
+            body_fg="#6060a0",
+            log_bg="#010102",
+            log_fg="#6060e0",
+            overlay_bg="#020204",
+            panel_bg="#080810",
+            panel_border="#5050c0",
+            target_bg="#080810",
+            cards=CardArt(
+                normal=("#0c0c18", "#5050c0", "#e8e8ff"),
+                heal=("#081810", "#408060", "#d8f0e0"),
+                heavy_hit=("#180810", "#c05080", "#ffe8f0"),
+                steal=("#100818", "#8060c0", "#f0e8ff"),
+                disabled=("#080810", "#404058", "#606070"),
+                selected=("#181028", "#7070e0", "#f0f0ff"),
+            ),
+            scale_hue=240 / 360,
+            card_style="void",
+            hud_active=("#181028", "#7070e0", "#f0f0ff"),
+        )
+    )
+
+    carnival_font = _theme_font("PressStart2P-Regular.ttf", "Minecraft")
+    presets.append(
+        _build_theme(
+            name="Candy Carnival",
+            font_path=carnival_font[0],
+            font_family=carnival_font[1],
+            screen_bg="#201018",
+            win_bg="#386830",
+            lose_bg="#883048",
+            title_fg="#ff90c0",
+            body_fg="#ffb0d0",
+            log_bg="#180810",
+            log_fg="#ff80b0",
+            overlay_bg="#201018",
+            panel_bg="#301828",
+            panel_border="#ff70a8",
+            target_bg="#301828",
+            cards=CardArt(
+                normal=("#402030", "#ff70a8", "#fff0f6"),
+                heal=("#204030", "#70e890", "#e8ffe8"),
+                heavy_hit=("#502028", "#ff5080", "#ffe8ee"),
+                steal=("#302040", "#c080ff", "#f4ecff"),
+                disabled=("#282028", "#806878", "#a89098"),
+                selected=("#503040", "#ffa0c8", "#fff8fa"),
+            ),
+            scale_hue=320 / 360,
+            card_style="candy",
+            hud_active=("#503040", "#ffa0c8", "#fff8fa"),
+        )
+    )
+
+    presets.append(
+        _build_theme(
+            name="Minecraft Village",
+            font_path=DEFAULT_FONT_PATH if DEFAULT_FONT_PATH.exists() else None,
+            font_family="Minecraft",
+            # Daylight sky matching the village reference art
+            screen_bg="#7eb8dc",
+            win_bg="#3d8c3a",
+            lose_bg="#8b3a2a",
+            title_fg="#2f5d2c",
+            body_fg="#3a4a30",
+            log_bg="#5a9cc0",
+            log_fg="#1e3a18",
+            overlay_bg="#7eb8dc",
+            panel_bg="#9ad070",
+            panel_border="#6b4f2a",
+            target_bg="#a8d878",
+            cards=CardArt(
+                # Classic grass-block greens + dirt browns
+                normal=("#5aaf3a", "#8b6b3d", "#f4ffe8"),
+                heal=("#3d9c48", "#6ecf6a", "#e8ffe8"),
+                heavy_hit=("#7a4a28", "#c07040", "#fff0d8"),
+                steal=("#4a8c38", "#9a7850", "#f8ffe8"),
+                disabled=("#6a7a58", "#8a9078", "#c8d0b8"),
+                selected=("#6ecf4a", "#c4a060", "#fffff0"),
+            ),
+            scale_hue=110 / 360,
+            card_style="village",
+            hud_active=("#4a8c38", "#e8c060", "#fffff0"),
+            hud_idle=("#9ad070", "#6b4f2a", "#2f5d2c"),
+            target_self=("#4a8c38", "#e8c060", "#fffff0"),
+            target_other=("#a8d878", "#6b4f2a", "#2f5d2c"),
+        )
+    )
+
     return presets
 
 
@@ -571,6 +956,7 @@ def generate_random_theme(rng: random.Random | None = None) -> GameTheme:
     heal_hue = (hue + 0.33) % 1.0
     steal_hue = (hue + 0.62) % 1.0
     heavy_hue = (hue + 0.08) % 1.0
+    poison_hue = 0.78  # purple/violet band
 
     screen_bg = _hsl_to_hex(hue, rng.uniform(0.18, 0.35), rng.uniform(0.08, 0.16))
     title_fg = _hsl_to_hex(hue, rng.uniform(0.15, 0.35), rng.uniform(0.82, 0.92))
@@ -587,6 +973,7 @@ def generate_random_theme(rng: random.Random | None = None) -> GameTheme:
         steal=_card_triplet(steal_hue, rng.uniform(0.3, 0.5), 0.18, 0.52, 0.9),
         disabled=_card_triplet(hue, 0.12, 0.16, 0.38, 0.52),
         selected=_card_triplet(accent_hue, rng.uniform(0.35, 0.55), 0.28, 0.62, 0.92),
+        poison=_card_triplet(poison_hue, rng.uniform(0.45, 0.65), 0.16, 0.58, 0.92),
     )
     hud_active = _card_triplet(accent_hue, rng.uniform(0.35, 0.55), 0.28, 0.62, 0.92)
     hud_idle = (
@@ -632,18 +1019,204 @@ def pick_creative_theme(rng: random.Random | None = None) -> GameTheme:
     return rng.choice(CREATIVE_THEMES)
 
 
+def all_selectable_themes() -> list[GameTheme]:
+    """Default + every hand-crafted creative theme (stable order for the picker)."""
+    return [default_theme(), *CREATIVE_THEMES]
+
+
+def theme_names() -> list[str]:
+    return [t.name for t in all_selectable_themes()]
+
+
+def find_theme_by_name(name: str) -> GameTheme | None:
+    needle = name.strip().lower()
+    for theme in all_selectable_themes():
+        if theme.name.lower() == needle:
+            return theme
+    return None
+
+
+def apply_theme_by_name(name: str) -> GameTheme | None:
+    theme = find_theme_by_name(name)
+    if theme is None:
+        return None
+    set_active_theme(theme)
+    return theme
+
+
 _ACTIVE: GameTheme = default_theme()
+
+
+def _triplet_to_list(rgb: tuple[str, str, str]) -> list[str]:
+    return [rgb[0], rgb[1], rgb[2]]
+
+
+def _triplet_from_list(raw: Any, fallback: tuple[str, str, str]) -> tuple[str, str, str]:
+    if not isinstance(raw, (list, tuple)) or len(raw) != 3:
+        return fallback
+    return (str(raw[0]), str(raw[1]), str(raw[2]))
+
+
+def theme_to_dict(theme: GameTheme) -> dict[str, Any]:
+    return {
+        "name": theme.name,
+        "font_path": str(theme.font_path) if theme.font_path else None,
+        "font_family": theme.font_family,
+        "screen_bg": theme.screen_bg,
+        "win_bg": theme.win_bg,
+        "lose_bg": theme.lose_bg,
+        "title_fg": theme.title_fg,
+        "body_fg": theme.body_fg,
+        "log_bg": theme.log_bg,
+        "log_fg": theme.log_fg,
+        "overlay_bg": theme.overlay_bg,
+        "panel_bg": theme.panel_bg,
+        "panel_border": theme.panel_border,
+        "target_bg": theme.target_bg,
+        "hud_active": _triplet_to_list(theme.hud_active),
+        "hud_idle": _triplet_to_list(theme.hud_idle),
+        "hud_dead": _triplet_to_list(theme.hud_dead),
+        "target_self": _triplet_to_list(theme.target_self),
+        "target_other": _triplet_to_list(theme.target_other),
+        "scale_trough": theme.scale_trough,
+        "scale_fill": theme.scale_fill,
+        "scale_border": theme.scale_border,
+        "scale_light": theme.scale_light,
+        "scale_dark": theme.scale_dark,
+        "card_style": theme.card_style,
+        "cards": {
+            "normal": _triplet_to_list(theme.cards.normal),
+            "heal": _triplet_to_list(theme.cards.heal),
+            "heavy_hit": _triplet_to_list(theme.cards.heavy_hit),
+            "steal": _triplet_to_list(theme.cards.steal),
+            "disabled": _triplet_to_list(theme.cards.disabled),
+            "selected": _triplet_to_list(theme.cards.selected),
+            "poison": _triplet_to_list(theme.cards.poison),
+        },
+    }
+
+
+def theme_from_dict(data: dict[str, Any]) -> GameTheme | None:
+    try:
+        style = str(data.get("card_style") or "pixel")
+        if style not in CARD_STYLES:
+            style = "pixel"
+        cards_raw = data.get("cards") or {}
+        if not isinstance(cards_raw, dict):
+            return None
+        blank = ("#333333", "#666666", "#ffffff")
+        cards = CardArt(
+            normal=_triplet_from_list(cards_raw.get("normal"), blank),
+            heal=_triplet_from_list(cards_raw.get("heal"), blank),
+            heavy_hit=_triplet_from_list(cards_raw.get("heavy_hit"), blank),
+            steal=_triplet_from_list(cards_raw.get("steal"), blank),
+            disabled=_triplet_from_list(cards_raw.get("disabled"), blank),
+            selected=_triplet_from_list(cards_raw.get("selected"), blank),
+            poison=_triplet_from_list(cards_raw.get("poison"), DEFAULT_POISON_ART),
+        )
+        font_raw = data.get("font_path")
+        font_path = Path(str(font_raw)) if font_raw else None
+        if font_path is not None and not font_path.exists():
+            font_path = DEFAULT_FONT_PATH if DEFAULT_FONT_PATH.exists() else None
+        return GameTheme(
+            name=str(data.get("name") or "Saved Theme"),
+            font_path=font_path,
+            font_family=str(data.get("font_family") or "Minecraft"),
+            screen_bg=str(data.get("screen_bg") or "#1a1a1a"),
+            win_bg=str(data.get("win_bg") or "#1a3a24"),
+            lose_bg=str(data.get("lose_bg") or "#3a1a1a"),
+            title_fg=str(data.get("title_fg") or "#f0f0f0"),
+            body_fg=str(data.get("body_fg") or "#c8c8c8"),
+            log_bg=str(data.get("log_bg") or "#101010"),
+            log_fg=str(data.get("log_fg") or "#d0d0d0"),
+            overlay_bg=str(data.get("overlay_bg") or "#000000"),
+            panel_bg=str(data.get("panel_bg") or "#222222"),
+            panel_border=str(data.get("panel_border") or "#888888"),
+            target_bg=str(data.get("target_bg") or "#1a1a1a"),
+            hud_active=_triplet_from_list(data.get("hud_active"), blank),
+            hud_idle=_triplet_from_list(data.get("hud_idle"), blank),
+            hud_dead=_triplet_from_list(data.get("hud_dead"), blank),
+            target_self=_triplet_from_list(data.get("target_self"), blank),
+            target_other=_triplet_from_list(data.get("target_other"), blank),
+            scale_trough=str(data.get("scale_trough") or "#333333"),
+            scale_fill=str(data.get("scale_fill") or "#66aa66"),
+            scale_border=str(data.get("scale_border") or "#444444"),
+            scale_light=str(data.get("scale_light") or "#88cc88"),
+            scale_dark=str(data.get("scale_dark") or "#226622"),
+            cards=cards,
+            card_style=style,  # type: ignore[arg-type]
+        )
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def save_theme_preference(theme: GameTheme | None = None) -> None:
+    """Persist the active theme so it restores on next launch."""
+    theme = theme or _ACTIVE
+    payload = {
+        "theme_name": theme.name,
+        "theme": theme_to_dict(theme),
+    }
+    try:
+        PREFS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def restore_theme_preference() -> GameTheme:
+    """Load the last saved theme, or fall back to Default."""
+    try:
+        data = json.loads(PREFS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        theme = default_theme()
+        set_active_theme(theme)
+        return theme
+
+    if not isinstance(data, dict):
+        theme = default_theme()
+        set_active_theme(theme)
+        return theme
+
+    name = str(data.get("theme_name") or "").strip()
+    named = find_theme_by_name(name) if name else None
+    # Named presets reload from code so palette tweaks still apply.
+    if named is not None and not name.lower().startswith("random"):
+        set_active_theme(named)
+        return named
+
+    snap = data.get("theme")
+    if isinstance(snap, dict):
+        theme = theme_from_dict(snap)
+        if theme is not None:
+            set_active_theme(theme)
+            return theme
+
+    if named is not None:
+        set_active_theme(named)
+        return named
+
+    theme = default_theme()
+    set_active_theme(theme)
+    return theme
 
 
 def active_theme() -> GameTheme:
     return _ACTIVE
 
 
-def set_active_theme(theme: GameTheme) -> None:
+def set_active_theme(theme: GameTheme, *, persist: bool = True) -> None:
     global _ACTIVE
     if theme.font_path and theme.font_path.exists():
         _register_font_file(theme.font_path)
     _ACTIVE = theme
+    try:
+        from crash_out_sfx import set_sfx_theme
+
+        set_sfx_theme(theme.card_style, theme.name)
+    except Exception:
+        pass
+    if persist:
+        save_theme_preference(theme)
 
 
 def reset_theme() -> GameTheme:

@@ -13,14 +13,15 @@ from typing import Any
 DEFAULT_STARTING_HP = 500
 DEFAULT_POWER_POINTS = 100
 PLAYER_COUNT_MIN = 1
-PLAYER_COUNT_MAX = 4
+PLAYER_COUNT_MAX = 10
 DECK_SIZE = 10  # default max cards (includes Mercy as last card)
+MAX_UNIQUE_CARDS_IN_DECK = 6
 DECK_SIZE_MIN = 3
 DECK_SIZE_MAX = 20
 # Duplicate archetypes (Bruiser, etc.) only when deck_size > this (i.e. 12+).
 # Steal / Heavy Hit / Shield / Poison stay unique regardless.
 ARCHETYPE_UNIQUE_LIMIT = 11
-FIFTH_CARD_HEAL = 25
+FIFTH_CARD_HEAL = 50
 STEAL_PP_COST = 25
 HEAVY_HIT_MULTIPLIER = 1.5
 COOLDOWN_CLEAR_TURNS = 2
@@ -30,6 +31,7 @@ ARCHETYPE_BUCKETS = 10
 BORROW_TURNS = 2  # return after thief ends this many turns (steal turn + 1 more)
 POISON_DURATION_TURNS = 3
 POISON_DOT_FRACTION = 0.10
+REAPER_DURATION_TURNS = 15
 BOT_NAME = "bot"
 HP_MIN, HP_MAX = 1, 9999
 PP_MIN, PP_MAX = 1, 999
@@ -50,6 +52,26 @@ ARCHETYPE_NAMES: dict[int, str] = {
     10: "Wrecker",
 }
 
+UNIQUE_CARD_FIELDS = (
+    "steals",
+    "heavy_hit",
+    "shields",
+    "poisons",
+    "exordia",
+    "cloak",
+    "lava",
+    "joker",
+    "reaper",
+    "cure",
+)
+
+
+@dataclass
+class ActiveReaper:
+    source_idx: int
+    target_idx: int
+    turns_left: int = 5
+
 
 @dataclass
 class Card:
@@ -62,13 +84,22 @@ class Card:
     heavy_hit: bool = False
     shields: bool = False
     poisons: bool = False
+    exordia: bool = False
+    cloak: bool = False
+    lava: bool = False
+    joker: bool = False
+    reaper: bool = False
+    cure: bool = False
+    exordia_uses: int = 0
+    exordia_charged: bool = False
+    lava_marked: bool = False
     borrowed_from: int | None = None
     cooldown_remaining: int = 0
 
     @property
     def effect(self) -> str:
         if self.heal_any:
-            return f"Heal any target for {self.heal} HP (you also heal if target isn't you)."
+            return f"Heal the selected player for {self.heal} HP."
         dmg, heal = effective_card_stats(self)
         base = f"{dmg} dmg to target / {heal} heal to you"
         if self.steals:
@@ -87,6 +118,20 @@ class Card:
                 base
                 + f" / Poison ({tick} dmg/turn for {POISON_DURATION_TURNS} turns)"
             )
+        if self.exordia:
+            if self.exordia_charged:
+                return "Charged Exordia — one-shot the next player, then discharge."
+            return "Charge Exordia by using it 4 times; on the next charge it one-shots the next player."
+        if self.cloak:
+            return "Cloak — the next 3 cards you use are delayed, then all 3 fire together."
+        if self.lava:
+            return "Floor is Lava — marks half of the targets cards, if you use a lava marked card, it deals 25% of your health back to you."
+        if self.joker:
+            return "Joker — randomly copy one of your own cards for one use at half stats; its effects stay the same."
+        if self.reaper:
+            return f"Reaper — if you stay above the target's HP for {REAPER_DURATION_TURNS} consecutive turns, execute them at the end of the final turn."
+        if self.cure:
+            return "Cure — clears your poison, lava marks, and Reaper effects from yourself."
         return base
 
     def label(self) -> str:
@@ -104,6 +149,18 @@ class Card:
                 extra_note = " + Shield"
             elif self.poisons:
                 extra_note = " + Poison"
+            elif self.exordia:
+                extra_note = " + Exordia"
+            elif self.cloak:
+                extra_note = " + Cloak"
+            elif self.lava:
+                extra_note = " + Floor is Lava"
+            elif self.joker:
+                extra_note = " + Joker"
+            elif self.reaper:
+                extra_note = " + Reaper"
+            elif self.cure:
+                extra_note = " + Cure"
             if not extra:
                 base = f"{self.name} — {primary_line}{extra_note}"
             else:
@@ -123,6 +180,18 @@ class Card:
         """
         if self.heal_any:
             return f"HEAL\n{self.heal}", "any target"
+        if self.exordia:
+            return "EXORDIA", "4x charge / 1-shot"
+        if self.cloak:
+            return "CLOAK", "3-turn delay"
+        if self.lava:
+            return "LAVA", "mark half / 25% HP"
+        if self.joker:
+            return "JOKER", "random 1-use copy"
+        if self.reaper:
+            return "REAPER", f"{REAPER_DURATION_TURNS} turns above HP"
+        if self.cure:
+            return "CURE", "clear your poison / lava / reaper"
         dmg, heal = effective_card_stats(self)
         if heal <= dmg:
             primary = f"{dmg}\nDMG"
@@ -170,6 +239,10 @@ class Player:
     cooldown_clear_turns: int = 0
     shield_charges: int = 0
     poisons: list[ActivePoison] = field(default_factory=list)
+    cloak_charges: int = 0
+    cloak_queue: list[Card] = field(default_factory=list)
+    reaper_marks: list[ActiveReaper] = field(default_factory=list)
+    cheats_enabled: bool = False
 
     @property
     def alive(self) -> bool:
@@ -194,6 +267,10 @@ def cooldown_turns_for(card: Card) -> int:
 def mark_card_played(player: Player, card: Card) -> None:
     """Start this card's cooldown. Tick at end of turn consumes 1 immediately."""
     player.last_card_id = card.id
+    if player.cheats_enabled:
+        for held in player.hand:
+            held.cooldown_remaining = 0
+        return
     turns = cooldown_turns_for(card)
     for held in player.hand:
         if held.id == card.id:
@@ -209,6 +286,8 @@ def _cooldown_remaining(player: Player, card: Card) -> int:
 
 
 def card_is_cooling(player: Player, card: Card) -> bool:
+    if player.cheats_enabled:
+        return False
     remaining = _cooldown_remaining(player, card)
     if remaining <= 0:
         return False
@@ -216,6 +295,28 @@ def card_is_cooling(player: Player, card: Card) -> bool:
     if player.cooldown_clear_turns > 0 and not card.heavy_hit:
         return False
     return True
+
+
+def unique_card_count(cards: list[Card]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for field, label in {
+        "steals": "Steal",
+        "heavy_hit": "Heavy Hit",
+        "shields": "Shield",
+        "poisons": "Poison",
+        "exordia": "Exordia",
+        "cloak": "Cloak",
+        "lava": "Floor is Lava",
+        "joker": "Joker",
+        "reaper": "Reaper",
+        "cure": "Cure",
+    }.items():
+        counts[label] = sum(getattr(card, field) for card in cards)
+    return counts
+
+
+def unique_card_total(cards: list[Card]) -> int:
+    return sum(unique_card_count(cards).values())
 
 
 @dataclass
@@ -277,7 +378,7 @@ def uniquify_name(base: str, existing: list[Card]) -> str:
 
 
 def card_archetype(card: Card) -> str:
-    """Archetype / Mercy / Heavy Hit / Shield / Poison name used for uniqueness."""
+    """Archetype / Mercy / Heavy Hit / Shield / Poison / special card name used for uniqueness."""
     if card.heal_any:
         return "Mercy"
     if card.heavy_hit:
@@ -286,6 +387,18 @@ def card_archetype(card: Card) -> str:
         return "Shield"
     if card.poisons:
         return "Poison"
+    if card.exordia:
+        return "Exordia"
+    if card.cloak:
+        return "Cloak"
+    if card.lava:
+        return "Floor is Lava"
+    if card.joker:
+        return "Joker"
+    if card.reaper:
+        return "Reaper"
+    if card.cure:
+        return "Cure"
     return name_for_split(card.damage, card.heal, card.damage + card.heal)
 
 
@@ -352,6 +465,22 @@ def deck_has_poison(existing: list[Card]) -> bool:
     return any(c.poisons for c in existing)
 
 
+def deck_has_reaper(existing: list[Card]) -> bool:
+    return any(c.reaper for c in existing)
+
+
+def can_add_reaper_card(existing: list[Card]) -> bool:
+    return not deck_has_reaper(existing)
+
+
+def deck_has_cure(existing: list[Card]) -> bool:
+    return any(c.cure for c in existing)
+
+
+def can_add_cure_card(existing: list[Card]) -> bool:
+    return not deck_has_cure(existing)
+
+
 def can_add_poison_card(existing: list[Card]) -> bool:
     return not deck_has_poison(existing)
 
@@ -372,6 +501,28 @@ def effective_card_stats(card: Card) -> tuple[int, int]:
     return card.damage, card.heal
 
 
+def tick_reaper_marks(players: list[Player]) -> list[str]:
+    logs: list[str] = []
+    for player in players:
+        remaining: list[ActiveReaper] = []
+        for mark in player.reaper_marks:
+            source = players[mark.source_idx] if 0 <= mark.source_idx < len(players) else None
+            if source is None or not source.alive or not player.alive:
+                continue
+            if source.hp <= player.hp:
+                logs.append(f"{player.name}'s Reaper mark breaks because their HP is no longer lower.")
+                continue
+            if mark.turns_left <= 1:
+                logs.append(f"{source.name}'s Reaper executes {player.name}.")
+                player.hp = 0
+                continue
+            mark.turns_left -= 1
+            remaining.append(mark)
+            logs.append(f"Reaper holds on {player.name}: {mark.turns_left} turn(s) remain.")
+        player.reaper_marks = remaining
+    return logs
+
+
 def craft_card(
     card_id: int,
     damage: int,
@@ -382,17 +533,39 @@ def craft_card(
     heavy_hit: bool = False,
     shields: bool = False,
     poisons: bool = False,
+    exordia: bool = False,
+    cloak: bool = False,
+    lava: bool = False,
+    joker: bool = False,
+    reaper: bool = False,
+    cure: bool = False,
     deck_size: int = DECK_SIZE,
 ) -> Card:
     """
     Build a craftable card.
-    Steal, Heavy Hit, Shield, and Poison stay unique. Normal archetypes are unique unless
-    deck_size is above ARCHETYPE_UNIQUE_LIMIT (then duplicates get numbered names).
+    Special cards are treated as unique one-per-deck effects. Standard archetypes stay unique
+    unless deck_size is above ARCHETYPE_UNIQUE_LIMIT.
     """
-    uniques = sum(1 for flag in (steals, heavy_hit, shields, poisons) if flag)
+    uniques = sum(
+        1
+        for flag in (
+            steals,
+            heavy_hit,
+            shields,
+            poisons,
+            exordia,
+            cloak,
+            lava,
+            joker,
+            reaper,
+            cure,
+        )
+        if flag
+    )
     if uniques > 1:
         raise ValueError(
-            "A card can only have one of: Steal, Heavy Hit, Shield, or Poison."
+            "A card can only have one special effect: Steal, Heavy Hit, Shield, Poison, "
+            "Exordia, Cloak, Floor is Lava, Joker, Reaper, or Cure."
         )
     if steals and not can_craft_steal(power_points):
         raise ValueError(f"Steal costs {STEAL_PP_COST} PP — not enough budget.")
@@ -406,20 +579,69 @@ def craft_card(
         raise ValueError("Shield costs half your PP — not enough left for heal.")
     if poisons and deck_has_poison(existing):
         raise ValueError("Your deck already has a Poison card. Only one per deck.")
-    budget = stat_budget(power_points, steals, shields=shields)
-    damage = max(0, min(budget, damage))
-    heal = budget - damage
-    if shields and damage > 0:
-        raise ValueError("Shield can only be put on a heal-only card (0 damage).")
-    if poisons and heal > 0:
-        raise ValueError("Poison can only be put on a damage-only card (0 heal).")
+    if exordia and any(c.exordia for c in existing):
+        raise ValueError("Your deck already has an Exordia card. Only one per deck.")
+    if cloak and any(c.cloak for c in existing):
+        raise ValueError("Your deck already has a Cloak card. Only one per deck.")
+    if lava and any(c.lava for c in existing):
+        raise ValueError("Your deck already has a Floor is Lava card. Only one per deck.")
+    if joker and any(c.joker for c in existing):
+        raise ValueError("Your deck already has a Joker card. Only one per deck.")
+    if reaper and any(c.reaper for c in existing):
+        raise ValueError("Your deck already has a Reaper card. Only one per deck.")
+    if cure and any(c.cure for c in existing):
+        raise ValueError("Your deck already has a Cure card. Only one per deck.")
+    if deck_size == DECK_SIZE and any(
+        (
+            steals,
+            heavy_hit,
+            shields,
+            poisons,
+            exordia,
+            cloak,
+            lava,
+            joker,
+            reaper,
+            cure,
+        )
+    ) and unique_card_total(existing) >= MAX_UNIQUE_CARDS_IN_DECK:
+        raise ValueError(
+            f"A {DECK_SIZE}-card deck can have at most "
+            f"{MAX_UNIQUE_CARDS_IN_DECK} unique cards."
+        )
+
+    if exordia or cloak or lava or joker or reaper or cure:
+        damage = 0
+        heal = 0
+    else:
+        budget = stat_budget(power_points, steals, shields=shields)
+        damage = max(0, min(budget, damage))
+        heal = budget - damage
+        if shields and damage > 0:
+            raise ValueError("Shield can only be put on a heal-only card (0 damage).")
+        if poisons and heal > 0:
+            raise ValueError("Poison can only be put on a damage-only card (0 heal).")
+
     if heavy_hit:
         base = "Heavy Hit"
     elif shields:
         base = "Shield"
     elif poisons:
         base = "Poison"
+    elif exordia:
+        base = "Exordia"
+    elif cloak:
+        base = "Cloak"
+    elif lava:
+        base = "Floor is Lava"
+    elif joker:
+        base = "Joker"
+    elif reaper:
+        base = "Reaper"
+    elif cure:
+        base = "Cure"
     else:
+        budget = stat_budget(power_points, steals, shields=shields)
         base = name_for_split(damage, heal, budget)
     allow_dupes = allows_duplicate_archetypes(deck_size)
     if archetype_taken(base, existing) and not allow_dupes:
@@ -438,6 +660,12 @@ def craft_card(
         heavy_hit=heavy_hit,
         shields=shields,
         poisons=poisons,
+        exordia=exordia,
+        cloak=cloak,
+        lava=lava,
+        joker=joker,
+        reaper=reaper,
+        cure=cure,
     )
 
 
@@ -469,6 +697,15 @@ def card_to_dict(card: Card) -> dict[str, Any]:
         "heavy_hit": bool(card.heavy_hit),
         "shields": bool(card.shields),
         "poisons": bool(card.poisons),
+        "exordia": bool(card.exordia),
+        "cloak": bool(card.cloak),
+        "lava": bool(card.lava),
+        "joker": bool(card.joker),
+        "reaper": bool(card.reaper),
+        "cure": bool(card.cure),
+        "exordia_uses": int(card.exordia_uses),
+        "exordia_charged": bool(card.exordia_charged),
+        "lava_marked": bool(card.lava_marked),
     }
 
 
@@ -483,6 +720,15 @@ def card_from_dict(data: dict[str, Any], card_id: int) -> Card:
         heavy_hit=bool(data.get("heavy_hit", False)),
         shields=bool(data.get("shields", False)),
         poisons=bool(data.get("poisons", False)),
+        exordia=bool(data.get("exordia", False)),
+        cloak=bool(data.get("cloak", False)),
+        lava=bool(data.get("lava", False)),
+        joker=bool(data.get("joker", False)),
+        reaper=bool(data.get("reaper", False)),
+        cure=bool(data.get("cure", False)),
+        exordia_uses=max(0, int(data.get("exordia_uses", 0))),
+        exordia_charged=bool(data.get("exordia_charged", False)),
+        lava_marked=bool(data.get("lava_marked", False)),
     )
 
 
@@ -539,28 +785,38 @@ def validate_deck_export(data: dict[str, Any]) -> tuple[list[Card], int, str]:
         if not isinstance(raw, dict):
             raise ValueError(f"Card {i} is invalid.")
         card = card_from_dict(raw, i)
-        unique_flags = sum(
-            1
-            for flag in (card.steals, card.heavy_hit, card.shields, card.poisons)
-            if flag
-        )
+        unique_flags = sum(bool(getattr(card, field)) for field in UNIQUE_CARD_FIELDS)
         if unique_flags > 1:
             raise ValueError(
-                f"Card '{card.name}' can only have one of: "
-                "Steal, Heavy Hit, Shield, or Poison."
+                f"Card '{card.name}' can only have one special effect: "
+                "Steal, Heavy Hit, Shield, Poison, Exordia, Cloak, Floor is Lava, or Joker."
             )
         if card.heal_any:
-            if card.steals or card.heavy_hit or card.shields or card.poisons:
+            if (
+                card.steals
+                or card.heavy_hit
+                or card.shields
+                or card.poisons
+                or card.exordia
+                or card.cloak
+                or card.lava
+                or card.joker
+                or card.reaper
+                or card.cure
+            ):
                 raise ValueError(
-                    f"Mercy card '{card.name}' cannot have Steal/Heavy Hit/Shield/Poison."
+                    f"Mercy card '{card.name}' cannot have special effects."
                 )
         else:
-            budget = stat_budget(power_points, card.steals, shields=card.shields)
-            if card.damage + card.heal != budget:
-                raise ValueError(
-                    f"Card '{card.name}' stats ({card.damage}+{card.heal}) "
-                    f"do not match {power_points} PP budget ({budget})."
-                )
+            if not (
+                card.exordia or card.cloak or card.lava or card.joker or card.reaper or card.cure
+            ):
+                budget = stat_budget(power_points, card.steals, shields=card.shields)
+                if card.damage + card.heal != budget:
+                    raise ValueError(
+                        f"Card '{card.name}' stats ({card.damage}+{card.heal}) "
+                        f"do not match {power_points} PP budget ({budget})."
+                    )
             if card.shields and card.damage > 0:
                 raise ValueError(
                     f"Shield card '{card.name}' must be heal-only (0 damage)."
@@ -578,14 +834,28 @@ def validate_deck_export(data: dict[str, Any]) -> tuple[list[Card], int, str]:
     mercies = [c for c in cards if c.heal_any]
     if len(mercies) != 1:
         raise ValueError("Deck must include exactly one Mercy card.")
-    if sum(1 for c in cards if c.steals) > 1:
-        raise ValueError("Deck can only have one steal card.")
-    if sum(1 for c in cards if c.heavy_hit) > 1:
-        raise ValueError("Deck can only have one Heavy Hit card.")
-    if sum(1 for c in cards if c.shields) > 1:
-        raise ValueError("Deck can only have one Shield card.")
-    if sum(1 for c in cards if c.poisons) > 1:
-        raise ValueError("Deck can only have one Poison card.")
+    unique_labels = {
+        "steals": "steal",
+        "heavy_hit": "Heavy Hit",
+        "shields": "Shield",
+        "poisons": "Poison",
+        "exordia": "Exordia",
+        "cloak": "Cloak",
+        "lava": "Floor is Lava",
+        "joker": "Joker",
+        "reaper": "Reaper",
+        "cure": "Cure",
+    }
+    for field, label in unique_labels.items():
+        if sum(bool(getattr(card, field)) for card in cards) > 1:
+            raise ValueError(f"Deck can only have one {label} card.")
+    if any(count > 1 for count in unique_card_count(cards).values()):
+        raise ValueError("Deck can only have one of each unique card.")
+    if len(cards) == DECK_SIZE and unique_card_total(cards) > MAX_UNIQUE_CARDS_IN_DECK:
+        raise ValueError(
+            f"A {DECK_SIZE}-card deck can have at most "
+            f"{MAX_UNIQUE_CARDS_IN_DECK} unique cards."
+        )
     return cards, power_points, deck_name
 
 
@@ -647,6 +917,12 @@ def is_protected_card(card: Card) -> bool:
         or card.heavy_hit
         or card.shields
         or card.poisons
+        or card.exordia
+        or card.cloak
+        or card.lava
+        or card.joker
+        or card.reaper
+        or card.cure
     )
 
 
@@ -740,6 +1016,8 @@ def apply_damage(
 ) -> list[str]:
     if damage <= 0:
         return []
+    if target.cheats_enabled:
+        return [f"{target.name}'s DEBUG immunity blocks {damage} damage."]
     if not bypass_shield and target.shield_charges > 0:
         target.shield_charges -= 1
         try:
@@ -796,23 +1074,139 @@ def resolve_card(
     players: list[Player],
     active: int,
     target_idx: int,
+    borrows: list[ActiveBorrow] | None = None,
 ) -> list[str]:
     """
     Normal cards:
       - Target other: damage them, then heal the caster.
       - Target self: heal the caster only (no self-damage).
-    Mercy: heal the target; if that isn't you, you also heal.
+    Mercy: heal only the selected target.
     """
     logs: list[str] = []
     caster = players[active]
     target = players[target_idx]
+
+    if card.lava_marked:
+        penalty = max(1, int(round(caster.hp * 0.25)))
+        card.lava_marked = False
+        logs.extend(apply_damage(caster, penalty))
+        logs.append(
+            f"{card.name} was marked by Floor is Lava — {caster.name} takes {penalty} damage ({penalty} = 25% of current HP)."
+        )
+
+    if card.cloak and active == target_idx:
+        caster.cloak_charges = 3
+        caster.cloak_queue.clear()
+        logs.append(f"{caster.name} casts Cloak — the next 3 card uses are delayed.")
+        return logs
+
+    if caster.cloak_charges > 0 and not card.cloak:
+        caster.cloak_queue.append(card)
+        caster.cloak_charges -= 1
+        logs.append(
+            f"{caster.name}'s Cloak suppresses {card.name}; {caster.cloak_charges} delayed use(s) left."
+        )
+        if caster.cloak_charges <= 0:
+            logs.append(
+                f"{caster.name}'s Cloak releases all queued cards together: "
+                + ", ".join(c.name for c in caster.cloak_queue)
+            )
+            caster.cloak_queue.clear()
+        return logs
+
+    if card.exordia:
+        if card.exordia_charged:
+            if 0 <= target_idx < len(players) and players[target_idx].alive:
+                next_target = players[target_idx]
+            else:
+                next_idx = next_alive_index(players, active)
+                next_target = players[next_idx] if next_idx is not None else caster
+            next_target.hp = 0
+            card.exordia_charged = caster.cheats_enabled
+            card.exordia_uses = 4 if caster.cheats_enabled else 0
+            logs.append(
+                f"{caster.name}'s Exordia charges and one-shots {next_target.name}!"
+            )
+            return logs
+        card.exordia_uses += 1
+        if card.exordia_uses >= 4:
+            card.exordia_charged = True
+            card.exordia_uses = 0
+            logs.append(f"{caster.name}'s Exordia is charged and ready to one-shot the next player.")
+            return logs
+        logs.append(f"{caster.name} charges Exordia ({card.exordia_uses}/4).")
+        return logs
+
+    if card.cure:
+        if card.lava_marked:
+            card.lava_marked = False
+            logs.append(f"{card.name} clears its own lava mark.")
+        caster.poisons.clear()
+        for held in caster.hand:
+            if held.lava_marked:
+                held.lava_marked = False
+        caster.reaper_marks.clear()
+        logs.append(f"{caster.name}'s Cure removes their poison, lava marks, and Reaper marks.")
+        return logs
+
+    if card.reaper:
+        if caster.hp <= target.hp:
+            logs.append(f"{caster.name}'s Reaper fails because their HP is not higher than {target.name}'s.")
+            return logs
+        target.reaper_marks.append(
+            ActiveReaper(
+                source_idx=active,
+                target_idx=target_idx,
+                turns_left=REAPER_DURATION_TURNS,
+            )
+        )
+        logs.append(
+            f"{target.name} is marked by Reaper: {caster.name} must stay above "
+            f"them in HP for {REAPER_DURATION_TURNS} turns."
+        )
+        return logs
+
+    if card.lava:
+        marked_cards = []
+        if target.hand:
+            need = max(1, (len(target.hand) + 1) // 2)
+            chosen = random.sample(target.hand, k=min(len(target.hand), need))
+            for held in chosen:
+                held.lava_marked = True
+                marked_cards.append(held.name)
+        if marked_cards:
+            logs.append(f"{target.name}'s cards are lava-marked: {', '.join(marked_cards)}.")
+        else:
+            logs.append(f"{target.name} has no cards to lava-mark.")
+        return logs
+
+    if card.joker:
+        sources = [
+            held
+            for held in caster.hand
+            if held is not card and not held.joker and not held.is_borrowed
+        ]
+        if not sources:
+            logs.append(f"{caster.name}'s Joker has no card to copy.")
+            return logs
+        source = random.choice(sources)
+        copied = copy.deepcopy(source)
+        copied.name = f"{source.name} (Joker)"
+        copied.damage = max(0, int(round(source.damage * 0.5)))
+        copied.heal = max(0, int(round(source.heal * 0.5)))
+        copied.id = card.id
+        copied.cooldown_remaining = 0
+        copied.lava_marked = False
+        logs.append(f"{caster.name}'s Joker copies {source.name} for this use at half stats.")
+        logs.extend(resolve_card(copied, players, active, target_idx, borrows))
+        if borrows is not None:
+            logs.extend(resolve_steal(copied, players, active, target_idx, borrows))
+        return logs
+
     damage, heal = effective_card_stats(card)
 
     if card.heal_any:
         logs.extend(apply_heal(target, card.heal))
-        if target_idx != active and card.heal > 0:
-            logs.append("(Mercy also restores the caster.)")
-            logs.extend(apply_heal(caster, card.heal))
         return logs
 
     if target_idx == active:
@@ -848,7 +1242,6 @@ def resolve_card(
         )
     if card.shields:
         logs.extend(apply_shield(caster))
-    # Poison applies even if Shield blocked the main hit.
     if card.poisons and target.alive:
         logs.extend(apply_poison(target, poison_tick_damage(damage)))
     return logs
@@ -1161,7 +1554,7 @@ def describe_target(
     if card.heal_any:
         if target_idx == active:
             return who + " (heal self)"
-        return who + " (heal them + heal you)"
+        return who + " (heal them only)"
     if target_idx == active:
         return who + " (self — heal yourself)"
     if card.steals:

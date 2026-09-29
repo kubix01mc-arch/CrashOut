@@ -8,7 +8,6 @@ import sys
 import time
 
 from CrashOut_Resources import (
-    ARCHETYPE_UNIQUE_LIMIT,
     BOT_NAME,
     DEFAULT_POWER_POINTS,
     DEFAULT_STARTING_HP,
@@ -34,6 +33,8 @@ from CrashOut_Resources import (
     check_winner,
     craft_card,
     can_add_heavy_hit_card,
+    can_add_poison_card,
+    can_add_shield_card,
     describe_target,
     make_bot_deck,
     make_mercy_card,
@@ -45,7 +46,24 @@ from CrashOut_Resources import (
     resolve_steal,
     return_expired_borrows,
     stat_budget,
+    tick_poisons_on_turn_start,
+    tick_reaper_marks,
     tick_turn_cooldowns,
+)
+from crash_out_sfx import (
+    SFX_CRAFT,
+    SFX_DEAL,
+    SFX_DENY,
+    SFX_LOSE,
+    SFX_MATCH_START,
+    SFX_MERCY_ADD,
+    SFX_TURN_SKIP,
+    SFX_TURN_START,
+    SFX_WIN,
+    play_card_play_sfx,
+    play_sfx,
+    set_sfx_muted,
+    set_sfx_theme,
 )
 
 
@@ -150,11 +168,32 @@ def create_card(
             "Add Heavy Hit? (+50% damage/heal, 2-turn cooldown, clears target "
             "cooldowns for 2 turns; one per deck.)"
         )
+    exordia = False
+    cloak = False
+    lava = False
+    joker = False
+    if not steals and not heavy_hit and not any(c.shields for c in existing) and not any(c.poisons for c in existing):
+        if prompt_yes_no("Add Exordia? (charges 4 uses, then one-shots the next player)"):
+            exordia = True
+        elif prompt_yes_no("Add Cloak? (delays your next 3 card uses, then all 3 fire at once)"):
+            cloak = True
+        elif prompt_yes_no("Add Floor is Lava? (marks half of target's cards; marked cards deal 25% current HP)"):
+            lava = True
+        elif prompt_yes_no("Add Joker? (randomly copies one of your own cards for one use at half stats; effects stay the same)"):
+            joker = True
     budget = stat_budget(power_points, steals)
     while True:
         clear()
         banner(f"Create Card {slot}/{deck_size}")
-        if steals:
+        if exordia:
+            print("This is Exordia — it charges over 4 uses and can one-shot the next player when charged.")
+        elif cloak:
+            print("This is Cloak — it suppresses your next 3 card uses, then fires all 3 together.")
+        elif lava:
+            print("This is Floor is Lava — it marks half of the target's cards and deals 25% current HP if marked cards are used.")
+        elif joker:
+            print("This is Joker — it randomly copies one of your own cards for one use at half stats; its effects stay the same.")
+        elif steals:
             print(
                 f"Spend {STEAL_PP_COST} PP on steal + {budget} PP on damage/heal "
                 f"({power_points} total)."
@@ -166,23 +205,70 @@ def create_card(
             )
         else:
             print(f"Spend exactly {power_points} power points.")
-        print("Each point becomes either 1 damage or 1 heal.")
-        print("Damage hits the target; heal always returns to YOU.")
+        if not exordia and not cloak and not lava and not joker:
+            print("Each point becomes either 1 damage or 1 heal.")
+            print("Damage hits the target; heal always returns to YOU.")
         if allows_duplicate_archetypes(deck_size):
             print(
-                f"Deck is above {ARCHETYPE_UNIQUE_LIMIT}: duplicate types allowed "
-                "(Steal / Heavy Hit still one each).\n"
+                "Deck is 12+: duplicate types allowed "
+                "(Steal / Heavy Hit / Shield / Poison still one each).\n"
             )
         else:
             print("You cannot have two cards of the same type in your deck.\n")
-        print("Types: Sanctuary / Caretaker / Allrounder / Bruiser / Wrecker")
+        print("Types change every 10% damage (Sanctuary … Allrounder … Wrecker).")
+        print(
+            "Shield: heal-only (0 damage), costs half your PP. "
+            "Poison: damage-only (0 heal), 10% DoT for 3 turns."
+        )
         if existing:
             taken = ", ".join(sorted({c.name for c in existing}))
             print(f"Already in deck: {taken}\n")
 
-        damage = prompt_int("Damage points", 0, budget)
-        heal = budget - damage
-        print(f"  -> Heal points auto-set to {heal}")
+        if exordia or cloak or lava or joker:
+            damage = 0
+            heal = 0
+        else:
+            damage = prompt_int("Damage points", 0, budget)
+            heal = budget - damage
+            print(f"  -> Heal points auto-set to {heal}")
+        shields = False
+        poisons = False
+        if (
+            not steals
+            and not heavy_hit
+            and not exordia
+            and not cloak
+            and not lava
+            and not joker
+            and damage == 0
+            and can_add_shield_card(existing, power_points)
+        ):
+            from CrashOut_Resources import shield_pp_cost
+
+            cost = shield_pp_cost(power_points)
+            remain = stat_budget(power_points, shields=True)
+            shields = prompt_yes_no(
+                f"Add Shield? Costs {cost} PP (half); {remain} PP heals you "
+                "(blocks next damage; one per deck)."
+            )
+            if shields:
+                heal = remain
+                print(f"  -> Shield: heal set to {heal} (after half-PP cost)")
+        elif (
+            not steals
+            and not heavy_hit
+            and not exordia
+            and not cloak
+            and not lava
+            and not joker
+            and heal == 0
+            and damage == budget
+            and can_add_poison_card(existing)
+        ):
+            poisons = prompt_yes_no(
+                "Add Poison? (Damage-only — 10% of this hit as DoT each of their "
+                "next 3 turns; applies even if Shield blocks the hit; one per deck.)"
+            )
         try:
             card = craft_card(
                 card_id,
@@ -191,9 +277,16 @@ def create_card(
                 existing,
                 steals=steals,
                 heavy_hit=heavy_hit,
+                shields=shields,
+                poisons=poisons,
+                exordia=exordia,
+                cloak=cloak,
+                lava=lava,
+                joker=joker,
                 deck_size=deck_size,
             )
         except ValueError as exc:
+            play_sfx(SFX_DENY)
             print(f"  -> {exc}")
             pause()
             continue
@@ -202,14 +295,37 @@ def create_card(
             print("  -> Steal: takes 1 opponent card for 1 turn")
         if card.heavy_hit:
             print("  -> Heavy Hit: +50% power, 2-turn cooldown, clears target cooldowns for 2 turns")
+        if card.shields:
+            print(
+                f"  -> Shield: blocks next damage "
+                f"(spent {power_points - card.heal} PP, heals {card.heal})"
+            )
+        if card.poisons:
+            from CrashOut_Resources import poison_tick_damage, POISON_DURATION_TURNS
+
+            tick = poison_tick_damage(card.damage)
+            print(
+                f"  -> Poison: {tick} dmg/turn for {POISON_DURATION_TURNS} turns "
+                "(ignores Shield)"
+            )
+        if card.exordia:
+            print("  -> Exordia: charges 4 uses, then one-shots the next player")
+        if card.cloak:
+            print("  -> Cloak: disables your next 3 card uses, then blasts all 3 together")
+        if card.lava:
+            print("  -> Floor is Lava: marks half of target's cards; using marked cards deals 25% current HP")
+        if card.joker:
+            print("  -> Joker: random one-use copy at half stats; copied effects stay the same")
         print()
         print_card(card)
         print()
+        play_sfx(SFX_CRAFT)
         pause("Card saved — press Enter...")
         return card
 
 
 def create_mercy_card(existing: list[Card], deck_size: int) -> Card:
+    play_sfx(SFX_MERCY_ADD)
     clear()
     banner(f"Create Card {deck_size}/{deck_size}")
     print(f"Special heal card — always heals {FIFTH_CARD_HEAL} HP to the target.")
@@ -271,6 +387,7 @@ def create_all_player_decks(
 def show_deal_summary(players: list[Player]) -> None:
     clear()
     banner("Cards Shuffled & Dealt")
+    play_sfx(SFX_DEAL)
     print("Craftable cards were shuffled and dealt. Mercy/steal stayed with owners.\n")
     for player in players:
         print(f"{player.name}:")
@@ -324,7 +441,18 @@ def choose_match_settings() -> MatchSettings:
     banner("Match Setup")
     size_pick = prompt_choice(
         "Pick a match size:",
-        ["1 player (vs bot)", "2 players", "3 players", "4 players"],
+        [
+            "1 player (vs bot)",
+            "2 players",
+            "3 players",
+            "4 players",
+            "5 players",
+            "6 players",
+            "7 players",
+            "8 players",
+            "9 players",
+            "10 players",
+        ],
     )
     player_count = size_pick + PLAYER_COUNT_MIN
     print()
@@ -347,8 +475,8 @@ def choose_match_settings() -> MatchSettings:
     )
     if allows_duplicate_archetypes(deck_size):
         print(
-            f"  Duplicate types allowed (deck above {ARCHETYPE_UNIQUE_LIMIT}); "
-            "Steal / Heavy Hit still one each."
+            "  Duplicate types allowed (deck 12+); "
+            "Steal / Heavy Hit / Shield / Poison still one each."
         )
     pause()
     return MatchSettings(player_count, starting_hp, power_points, deck_size)
@@ -356,6 +484,8 @@ def choose_match_settings() -> MatchSettings:
 
 def pass_device(next_player: Player) -> None:
     clear()
+    if not next_player.is_bot:
+        play_sfx(SFX_TURN_START)
     if next_player.is_bot:
         banner("Bot's Turn")
         print("  The bot is about to play.\n")
@@ -374,7 +504,7 @@ def choose_target(players: list[Player], active: int, card: Card) -> int | None:
     for i in legal:
         label = f"{players[i].name} ({players[i].hp}/{players[i].max_hp} HP)"
         if card.heal_any:
-            label += " (heal target; you also heal)"
+            label += " (heal target only)"
         elif i == active:
             label += " (you — heal yourself)"
         else:
@@ -384,6 +514,7 @@ def choose_target(players: list[Player], active: int, card: Card) -> int | None:
 
 
 def announce_play(player: Player, card: Card) -> None:
+    play_card_play_sfx(card)
     if card.heal_any:
         print(f"\n>>> {player.name} plays '{card.name}' (heal {card.heal})!\n")
     else:
@@ -418,6 +549,8 @@ def play_turn(
     playable = player.playable_cards()
     if not playable:
         print(f"{player.name} has no playable cards — turn skipped.")
+        if not player.is_bot:
+            play_sfx(SFX_TURN_SKIP)
         player.last_card_id = None
         turn_delay()
         borrows, return_logs = return_expired_borrows(players, active, borrows)
@@ -428,39 +561,43 @@ def play_turn(
         return borrows
 
     if player.is_bot:
-        print("Bot hand:")
-        for i, card in enumerate(player.hand, start=1):
-            print_card(card, i, cooling_down=card_is_cooling(player, card))
-        print()
-        choice = bot_choose_play(players, active, starting_hp)
-        if choice is None:
-            print("Bot has no playable cards — turn skipped.")
-            player.last_card_id = None
-            turn_delay()
+        set_sfx_muted(True)
+        try:
+            print("Bot hand:")
+            for i, card in enumerate(player.hand, start=1):
+                print_card(card, i, cooling_down=card_is_cooling(player, card))
+            print()
+            choice = bot_choose_play(players, active, starting_hp)
+            if choice is None:
+                print("Bot has no playable cards — turn skipped.")
+                player.last_card_id = None
+                turn_delay()
+                borrows, return_logs = return_expired_borrows(players, active, borrows)
+                for line in return_logs:
+                    print(f"  -> {line}")
+                for line in tick_turn_cooldowns(players, active):
+                    print(f"  -> {line}")
+                return borrows
+            card, target_idx, reason = choice
+            mark_card_played(player, card)
+            print(f"Bot plan: {reason}\n")
+            announce_play(player, card)
+            print(f"Targeted: {describe_target(card, players, active, target_idx)}")
+            print("\n--- Resolve ---")
+            for line in resolve_card(card, players, active, target_idx, borrows):
+                print(f"  -> {line}")
+            resolve_steal_if_needed(card, players, active, target_idx, borrows)
+            print()
+            print_status(players)
+            turn_delay("Ending bot turn...")
             borrows, return_logs = return_expired_borrows(players, active, borrows)
             for line in return_logs:
                 print(f"  -> {line}")
             for line in tick_turn_cooldowns(players, active):
                 print(f"  -> {line}")
             return borrows
-        card, target_idx, reason = choice
-        mark_card_played(player, card)
-        print(f"Bot plan: {reason}\n")
-        announce_play(player, card)
-        print(f"Targeted: {describe_target(card, players, active, target_idx)}")
-        print("\n--- Resolve ---")
-        for line in resolve_card(card, players, active, target_idx):
-            print(f"  -> {line}")
-        resolve_steal_if_needed(card, players, active, target_idx, borrows)
-        print()
-        print_status(players)
-        turn_delay("Ending bot turn...")
-        borrows, return_logs = return_expired_borrows(players, active, borrows)
-        for line in return_logs:
-            print(f"  -> {line}")
-        for line in tick_turn_cooldowns(players, active):
-            print(f"  -> {line}")
-        return borrows
+        finally:
+            set_sfx_muted(False)
 
     print("Your cards (reuse allowed; not twice in a row):\n")
     for i, card in enumerate(player.hand, start=1):
@@ -471,6 +608,7 @@ def play_turn(
         pick = prompt_int("Play which card #", 1, len(player.hand)) - 1
         card = player.hand[pick]
         if card_is_cooling(player, card):
+            play_sfx(SFX_DENY)
             print(f"  '{card.name}' is cooling down — pick a different card.")
             continue
         break
@@ -483,7 +621,7 @@ def play_turn(
     else:
         print(f"Targeted: {describe_target(card, players, active, target_idx)}")
         print("\n--- Resolve ---")
-        for line in resolve_card(card, players, active, target_idx):
+        for line in resolve_card(card, players, active, target_idx, borrows):
             print(f"  -> {line}")
         resolve_steal_if_needed(card, players, active, target_idx, borrows)
 
@@ -509,6 +647,37 @@ def game_loop(players: list[Player], starting_hp: int) -> None:
             active = nxt
             continue
 
+        for line in tick_poisons_on_turn_start(players[active]):
+            print(f"  -> {line}")
+        for line in tick_reaper_marks(players):
+            print(f"  -> {line}")
+        if not players[active].alive:
+            winner = check_winner(players)
+            if winner is not None:
+                clear()
+                banner("Game Over")
+                print_status(players)
+                print(f"  *** {winner.name} wins! ***\n")
+                play_sfx(SFX_WIN)
+                pause()
+                return
+            continue
+        if not players[active].alive:
+            winner = check_winner(players)
+            if winner is not None:
+                clear()
+                banner("Game Over")
+                print_status(players)
+                print(f"  *** {winner.name} wins! ***\n")
+                play_sfx(SFX_WIN)
+                pause()
+                return
+            nxt = next_alive_index(players, active)
+            if nxt is None:
+                break
+            active = nxt
+            continue
+
         pass_device(players[active])
         borrows = play_turn(players, active, starting_hp, borrows)
 
@@ -518,6 +687,7 @@ def game_loop(players: list[Player], starting_hp: int) -> None:
             banner("Game Over")
             print_status(players)
             print(f"  *** {winner.name} wins! ***\n")
+            play_sfx(SFX_WIN)
             pause()
             return
 
@@ -526,6 +696,7 @@ def game_loop(players: list[Player], starting_hp: int) -> None:
             clear()
             banner("Game Over")
             print("No one left standing.\n")
+            play_sfx(SFX_LOSE)
             pause()
             return
         active = nxt
@@ -533,6 +704,7 @@ def game_loop(players: list[Player], starting_hp: int) -> None:
 
 def main() -> None:
     try:
+        set_sfx_theme("pixel", "Default")
         clear()
         banner("Welcome")
         print("Terminal mode — hotseat or 1 player vs bot.")
@@ -542,8 +714,8 @@ def main() -> None:
             f"Deck size {DECK_SIZE_MIN}-{DECK_SIZE_MAX}."
         )
         print(
-            f"Above {ARCHETYPE_UNIQUE_LIMIT} cards: duplicate types allowed "
-            "(Steal / Heavy Hit still one each).\n"
+            "12+ cards: duplicate types allowed "
+            "(Steal / Heavy Hit / Shield / Poison still one each).\n"
         )
         pause()
 
@@ -576,6 +748,7 @@ def main() -> None:
         banner("Players")
         print_status(players)
         pause("Press Enter to begin...")
+        play_sfx(SFX_MATCH_START)
         game_loop(players, settings.starting_hp)
 
         clear()
