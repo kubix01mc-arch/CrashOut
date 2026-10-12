@@ -5,10 +5,28 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import random
+import re
+import socket
+import subprocess
+import sys
 import tkinter as tk
+import time
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from urllib.parse import urlencode, urlsplit
+from urllib.request import urlopen
+
+PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = (
+    PROJECT_DIR.parent / "Crash out"
+    if PROJECT_DIR.name.casefold() == "pbl"
+    else PROJECT_DIR
+)
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 try:
     from PIL import Image, ImageTk
@@ -29,6 +47,7 @@ from CrashOut_Resources import (
     HP_MIN,
     MatchSettings,
     MAX_UNIQUE_CARDS_IN_DECK,
+    PLAYER_COUNT_MAX,
     PP_MAX,
     PP_MIN,
     STEAL_PP_COST,
@@ -40,10 +59,12 @@ from CrashOut_Resources import (
     archetype_taken,
     bot_choose_play,
     build_deck_export,
+    card_archetype,
     can_add_heavy_hit_card,
     can_add_poison_card,
     can_add_shield_card,
     can_add_steal_card,
+    can_add_vampire_card,
     can_craft_steal,
     card_is_cooling,
     check_winner,
@@ -53,6 +74,7 @@ from CrashOut_Resources import (
     deck_has_poison,
     deck_has_shield,
     deck_has_steal,
+    deck_has_vampire,
     default_decks_dir,
     describe_target,
     load_deck_file,
@@ -119,7 +141,7 @@ PREVIEW_CARD_W = 168
 DECK_MINI_W = 110
 UNIQUE_PICK_W = 120
 UNIQUE_PICK_H = 168
-BOT_ICON_PATH = Path(__file__).resolve().parent / "assets" / "bot_icon.png"
+BOT_ICON_PATH = PROJECT_ROOT / "assets" / "bot_icon.png"
 
 
 def _theme():
@@ -948,6 +970,7 @@ class RoundedCardButton(tk.Canvas):
                 "lava",
                 "joker",
                 "reaper",
+                "vampire",
                 "cure",
             )
         )
@@ -997,6 +1020,8 @@ class RoundedCardButton(tk.Canvas):
             return art.poison
         if self.card.reaper:
             return ("#2b0f1a", "#ff5b7a", "#fbe7ef")
+        if self.card.vampire:
+            return ("#260d16", "#d9345b", "#fff0f3")
         if self.card.cure:
             return ("#0d2d1f", "#7cf2b7", "#e8fff5")
         return art.normal
@@ -1184,9 +1209,9 @@ class RoundedCardButton(tk.Canvas):
         self._hover = True
         if self.flip_on_hover:
             self._animate_flip_to(0.0)
-            self._show_detail_popup()
         else:
             self._draw(hover=True)
+        self._show_detail_popup()
 
     def _on_leave(self, _event=None) -> None:
         self._hover = False
@@ -1197,7 +1222,7 @@ class RoundedCardButton(tk.Canvas):
             self._draw(hover=False)
 
     def _on_motion(self, _event=None) -> None:
-        if self._hover and self.flip_on_hover:
+        if self._hover:
             self._position_detail_popup()
 
     def _show_detail_popup(self) -> None:
@@ -1802,6 +1827,7 @@ class CrashOutApp(tk.Tk):
         self._game_over_winner: str | None = None
         self._death_causes: dict[int, str] = {}
         self._fullscreen = False
+        self._lan_servers: list[subprocess.Popen] = []
         self.bind("<F11>", self._toggle_fullscreen)
 
         self.settings: MatchSettings | None = None
@@ -2012,6 +2038,15 @@ class CrashOutApp(tk.Tk):
         self.show_setup()
 
     def _on_close(self) -> None:
+        for server in self._lan_servers:
+            if server.poll() is None:
+                server.terminate()
+                try:
+                    server.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait()
+        self._lan_servers.clear()
         save_theme_preference()
         shutdown_audio()
         self.destroy()
@@ -2773,9 +2808,9 @@ class CrashOutApp(tk.Tk):
         self._menu_text(
             center,
             (
-                "Window mode — craft cards, then play hotseat or vs bot. "
+                "Window mode — craft cards, then play hotseat, vs bot, or online. "
                 "In multiplayer, each player builds a deck; craftable cards are then "
-                "shuffled and re-dealt (Mercy and steal stay with their owner)."
+                "shuffled and re-dealt (Mercy and unique-effect cards stay with their owner)."
             ),
             tint,
             fg=theme.body_fg,
@@ -2794,17 +2829,8 @@ class CrashOutApp(tk.Tk):
         modes = ttk.Combobox(
             form,
             textvariable=self.mode_var,
-            values=[
-                "1 — vs bot",
-                "2 players",
-                "3 players",
-                "4 players",
-                "5 players",
-                "6 players",
-                "7 players",
-                "8 players",
-                "9 players",
-                "10 players",
+            values=["1 — vs bot"] + [
+                f"{count} players" for count in range(2, PLAYER_COUNT_MAX + 1)
             ],
             state="readonly",
             width=18,
@@ -2889,6 +2915,47 @@ class CrashOutApp(tk.Tk):
             command=self.begin_card_lab,
         ).pack(pady=8)
 
+        online_row = tk.Frame(center, bg=tint)
+        online_row.pack(pady=(6, 8))
+        ThemedArtButton(
+            online_row,
+            text="Host Online",
+            width=200,
+            height=48,
+            palette="steal",
+            text_scale=0.55,
+            command=self._host_online_game,
+        ).pack(side="left", padx=6)
+        ThemedArtButton(
+            online_row,
+            text="Host on LAN",
+            width=200,
+            height=48,
+            palette="heavy_hit",
+            text_scale=0.55,
+            command=self._host_lan_game,
+        ).pack(side="left", padx=6)
+        join_row = tk.Frame(center, bg=tint)
+        join_row.pack(pady=(0, 8))
+        ThemedArtButton(
+            join_row,
+            text="Join Online by Code",
+            width=220,
+            height=48,
+            palette="normal",
+            text_scale=0.5,
+            command=self._join_online_game,
+        ).pack(side="left", padx=6)
+        ThemedArtButton(
+            join_row,
+            text="Join LAN by Code",
+            width=220,
+            height=48,
+            palette="selected",
+            text_scale=0.5,
+            command=self._join_lan_game,
+        ).pack(side="left", padx=6)
+
         theme_row = self._wallpaper_frame(center, tint)
         theme_row.pack(pady=(16, 4))
         ttk.Label(theme_row, text="Theme", style="SetupBody.TLabel").pack(
@@ -2925,6 +2992,218 @@ class CrashOutApp(tk.Tk):
             size=16,
             pady=(8, 0),
         )
+
+    def _normalize_online_url(
+        self,
+        value: str,
+        *,
+        default_scheme: str,
+    ) -> str | None:
+        url = value.strip().rstrip("/")
+        if "://" not in url:
+            url = f"{default_scheme}://{url}"
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.netloc
+            or parsed.path not in ("", "/")
+            or parsed.query
+            or parsed.fragment
+        ):
+            messagebox.showerror(
+                "Invalid Server URL",
+                "Enter a server base address, such as http://192.168.1.20:54321.",
+                parent=self,
+            )
+            return None
+        return url
+
+    def _online_server_url(self) -> str | None:
+        config_path = Path.home() / ".crash_out_online_url"
+        url = os.environ.get("CRASH_OUT_ONLINE_URL", "").strip()
+        if not url:
+            try:
+                url = config_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+        if not url:
+            url = simpledialog.askstring(
+                "Online Multiplayer",
+                "Enter the public Crash Out server URL (from the server deployment):",
+                parent=self,
+            )
+            if not url:
+                return None
+        url = self._normalize_online_url(url, default_scheme="https")
+        if not url:
+            return None
+        try:
+            config_path.write_text(url, encoding="utf-8")
+        except OSError:
+            pass
+        return url
+
+    def _launch_online_window(self, url: str) -> None:
+        if sys.platform == "darwin":
+            if not webbrowser.open(url, new=1):
+                messagebox.showerror(
+                    "Online Multiplayer",
+                    "Could not open the online game in your default browser.",
+                    parent=self,
+                )
+            return
+        try:
+            import webview
+        except ImportError:
+            messagebox.showerror(
+                "Online Multiplayer",
+                "Install the windowed online dependencies with:\n"
+                "python -m pip install -r requirements-windowed-online.txt",
+                parent=self,
+            )
+            return
+        self.withdraw()
+        try:
+            webview.create_window(
+                "Crash Out Online",
+                url,
+                width=1100,
+                height=820,
+                min_size=(640, 520),
+            )
+            webview.start()
+        except Exception as exc:
+            messagebox.showerror("Online Multiplayer", str(exc), parent=self)
+        finally:
+            self.deiconify()
+
+    def _host_online_game(self) -> None:
+        server_url = self._online_server_url()
+        if server_url:
+            self._launch_online_window(server_url)
+
+    def _host_lan_game(self) -> None:
+        project_root = PROJECT_ROOT
+        with socket.socket() as probe:
+            probe.bind(("0.0.0.0", 0))
+            port = probe.getsockname()[1]
+        command = [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "server.app:app",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+        ]
+        try:
+            server = subprocess.Popen(
+                command,
+                cwd=project_root,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError as exc:
+            messagebox.showerror("LAN Host", str(exc), parent=self)
+            return
+
+        local_url = f"http://127.0.0.1:{port}"
+        for _ in range(50):
+            if server.poll() is not None:
+                messagebox.showerror(
+                    "LAN Host",
+                    "The local game server stopped while starting. Install the "
+                    "windowed online dependencies and try again.",
+                    parent=self,
+                )
+                return
+            try:
+                with urlopen(f"{local_url}/api/host-info", timeout=0.3):
+                    break
+            except Exception:
+                time.sleep(0.1)
+        else:
+            server.terminate()
+            messagebox.showerror(
+                "LAN Host",
+                "The local game server did not become ready.",
+                parent=self,
+            )
+            return
+
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(("8.8.8.8", 80))
+                lan_ip = probe.getsockname()[0]
+        except OSError:
+            lan_ip = "127.0.0.1"
+        messagebox.showinfo(
+            "LAN Host",
+            f"Friends on the same Wi-Fi connect to http://{lan_ip}:{port}, "
+            "then enter the six-digit room code shown in the lobby.",
+            parent=self,
+        )
+        if sys.platform == "darwin":
+            self._lan_servers.append(server)
+            self._launch_online_window(local_url)
+            return
+        try:
+            self._launch_online_window(local_url)
+        finally:
+            if server.poll() is None:
+                server.terminate()
+                try:
+                    server.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    server.kill()
+                    server.wait()
+
+    def _join_online_game(self) -> None:
+        server_url = self._online_server_url()
+        if server_url:
+            self._join_game_at_server(server_url, "Join Online Game")
+
+    def _join_lan_game(self) -> None:
+        address = simpledialog.askstring(
+            "Join LAN Game",
+            "Enter the host's LAN address (shown when they host):",
+            parent=self,
+        )
+        if not address:
+            return
+        server_url = self._normalize_online_url(address, default_scheme="http")
+        if server_url:
+            self._join_game_at_server(server_url, "Join LAN Game")
+
+    def _join_game_at_server(self, server_url: str, title: str) -> None:
+        code = simpledialog.askstring(
+            title,
+            "Enter the six-digit room code:",
+            parent=self,
+        )
+        if code is None:
+            return
+        code = code.strip()
+        if not re.fullmatch(r"[0-9]{6}", code):
+            messagebox.showerror(
+                "Invalid Room Code",
+                "Room codes contain exactly six digits.",
+                parent=self,
+            )
+            return
+        name = simpledialog.askstring(
+            title,
+            "Enter your player name:",
+            initialvalue="Player",
+            parent=self,
+        )
+        if name is None:
+            return
+        query = urlencode({"join": code, "name": name.strip() or "Player"})
+        self._launch_online_window(f"{server_url}/?{query}")
 
     def _setup_rules_text(self, deck_size: int) -> str:
         last = deck_size
@@ -3040,7 +3319,7 @@ class CrashOutApp(tk.Tk):
             lab_hint = (
                 f"player-{self.crafting_player}, spend exactly {pp} power points "
                 f"(damage + heal). Craftable cards are shuffled and re-dealt when "
-                f"everyone is done. Mercy and steal stay with their owner."
+                f"everyone is done. Mercy and unique-effect cards stay with their owner."
             )
         theme = _theme()
         tint = theme.screen_bg
@@ -3079,6 +3358,15 @@ class CrashOutApp(tk.Tk):
             height=40,
             palette="normal",
         ).pack(side="left", padx=6)
+        ThemedArtButton(
+            deck_io,
+            "Random 6-Unique Deck",
+            command=self._randomize_crafted_deck,
+            width=220,
+            height=40,
+            palette="heavy_hit",
+            text_scale=0.8,
+        ).pack(side="left", padx=6)
         type_hint = (
             f"Duplicate types allowed (deck 12+); "
             f"uniques still one each; max {MAX_UNIQUE_CARDS_IN_DECK} unique cards in a 10-card deck."
@@ -3104,6 +3392,7 @@ class CrashOutApp(tk.Tk):
         self.lava_var = tk.BooleanVar(value=False)
         self.joker_var = tk.BooleanVar(value=False)
         self.reaper_var = tk.BooleanVar(value=False)
+        self.vampire_var = tk.BooleanVar(value=False)
         self.cure_var = tk.BooleanVar(value=False)
         self._shield_pick = None
 
@@ -3201,13 +3490,33 @@ class CrashOutApp(tk.Tk):
 
         UniquePickCard(
             unique_row,
-            "Exordia",
+            "Exodia",
             variable=self.exordia_var,
             command=self._on_exordia_toggle,
             palette="selected",
             bg=tint,
         ).pack(side="left", padx=8)
         any_unique = True
+        if can_add_vampire_card(self.crafted):
+            UniquePickCard(
+                unique_row,
+                "Vampire",
+                variable=self.vampire_var,
+                command=self._on_vampire_toggle,
+                palette="poison",
+                bg=tint,
+            ).pack(side="left", padx=8)
+            any_unique = True
+        else:
+            UniquePickCard(
+                unique_row,
+                "Vampire",
+                variable=tk.BooleanVar(value=True),
+                palette="disabled",
+                bg=tint,
+                locked=True,
+            ).pack(side="left", padx=8)
+            any_unique = True
         UniquePickCard(
             unique_row,
             "Cloak",
@@ -3344,6 +3653,7 @@ class CrashOutApp(tk.Tk):
             self.lava_var.set(False)
             self.joker_var.set(False)
             self.reaper_var.set(False)
+            self.vampire_var.set(False)
             self.cure_var.set(False)
         self._refresh_craft_slider()
 
@@ -3357,6 +3667,7 @@ class CrashOutApp(tk.Tk):
             self.lava_var.set(False)
             self.joker_var.set(False)
             self.reaper_var.set(False)
+            self.vampire_var.set(False)
             self.cure_var.set(False)
         self._refresh_craft_slider()
 
@@ -3370,6 +3681,7 @@ class CrashOutApp(tk.Tk):
             self.lava_var.set(False)
             self.joker_var.set(False)
             self.reaper_var.set(False)
+            self.vampire_var.set(False)
             self.cure_var.set(False)
             # Shield is heal-only — snap damage to 0.
             self.damage_var.set(0)
@@ -3387,6 +3699,7 @@ class CrashOutApp(tk.Tk):
             self.lava_var.set(False)
             self.joker_var.set(False)
             self.reaper_var.set(False)
+            self.vampire_var.set(False)
             self.cure_var.set(False)
             # Poison is damage-only — snap to full damage.
             budget = self._craft_budget()
@@ -3405,6 +3718,7 @@ class CrashOutApp(tk.Tk):
             self.lava_var.set(False)
             self.joker_var.set(False)
             self.reaper_var.set(False)
+            self.vampire_var.set(False)
             self.cure_var.set(False)
         self._refresh_craft_slider()
 
@@ -3418,6 +3732,7 @@ class CrashOutApp(tk.Tk):
             self.lava_var.set(False)
             self.joker_var.set(False)
             self.reaper_var.set(False)
+            self.vampire_var.set(False)
             self.cure_var.set(False)
         self._refresh_craft_slider()
 
@@ -3431,6 +3746,7 @@ class CrashOutApp(tk.Tk):
             self.cloak_var.set(False)
             self.joker_var.set(False)
             self.reaper_var.set(False)
+            self.vampire_var.set(False)
             self.cure_var.set(False)
         self._refresh_craft_slider()
 
@@ -3444,6 +3760,7 @@ class CrashOutApp(tk.Tk):
             self.cloak_var.set(False)
             self.lava_var.set(False)
             self.joker_var.set(False)
+            self.vampire_var.set(False)
             self.cure_var.set(False)
         self._refresh_craft_slider()
 
@@ -3458,6 +3775,7 @@ class CrashOutApp(tk.Tk):
             self.lava_var.set(False)
             self.joker_var.set(False)
             self.reaper_var.set(False)
+            self.vampire_var.set(False)
         self._refresh_craft_slider()
 
     def _on_joker_toggle(self) -> None:
@@ -3469,6 +3787,21 @@ class CrashOutApp(tk.Tk):
             self.exordia_var.set(False)
             self.cloak_var.set(False)
             self.lava_var.set(False)
+            self.reaper_var.set(False)
+            self.vampire_var.set(False)
+            self.cure_var.set(False)
+        self._refresh_craft_slider()
+
+    def _on_vampire_toggle(self) -> None:
+        if self.vampire_var.get():
+            self.steal_var.set(False)
+            self.heavy_hit_var.set(False)
+            self.shield_var.set(False)
+            self.poison_var.set(False)
+            self.exordia_var.set(False)
+            self.cloak_var.set(False)
+            self.lava_var.set(False)
+            self.joker_var.set(False)
             self.reaper_var.set(False)
             self.cure_var.set(False)
         self._refresh_craft_slider()
@@ -3513,6 +3846,7 @@ class CrashOutApp(tk.Tk):
         lava = self.lava_var.get()
         joker = self.joker_var.get()
         reaper = self.reaper_var.get()
+        vampire = self.vampire_var.get()
         cure = self.cure_var.get()
         heal = budget - damage
         self.damage_var.set(damage)
@@ -3528,7 +3862,7 @@ class CrashOutApp(tk.Tk):
         elif poisons:
             name = "Poison"
         elif exordia:
-            name = "Exordia"
+            name = "Exodia"
         elif cloak:
             name = "Cloak"
         elif lava:
@@ -3537,6 +3871,8 @@ class CrashOutApp(tk.Tk):
             name = "Joker"
         elif reaper:
             name = "Reaper"
+        elif vampire:
+            name = "Vampire"
         elif cure:
             name = "Cure"
         else:
@@ -3555,6 +3891,7 @@ class CrashOutApp(tk.Tk):
             lava=lava,
             joker=joker,
             reaper=reaper,
+            vampire=vampire,
             cure=cure,
         )
         taken = archetype_taken(name, self.crafted)
@@ -3577,6 +3914,8 @@ class CrashOutApp(tk.Tk):
             block_dupe = True
         if reaper and any(c.reaper for c in self.crafted):
             block_dupe = True
+        if vampire and deck_has_vampire(self.crafted):
+            block_dupe = True
         if cure and any(c.cure for c in self.crafted):
             block_dupe = True
         if (
@@ -3592,6 +3931,7 @@ class CrashOutApp(tk.Tk):
                     lava,
                     joker,
                     reaper,
+                    vampire,
                     cure,
                 )
             )
@@ -3613,7 +3953,7 @@ class CrashOutApp(tk.Tk):
             elif poisons and deck_has_poison(self.crafted):
                 msg = "Poison already in deck (attribute — one only)."
             elif exordia and any(c.exordia for c in self.crafted):
-                msg = "Exordia already in deck (one only)."
+                msg = "Exodia already in deck (one only)."
             elif cloak and any(c.cloak for c in self.crafted):
                 msg = "Cloak already in deck (one only)."
             elif lava and any(c.lava for c in self.crafted):
@@ -3622,6 +3962,8 @@ class CrashOutApp(tk.Tk):
                 msg = "Joker already in deck (one only)."
             elif reaper and any(c.reaper for c in self.crafted):
                 msg = "Reaper already in deck (one only)."
+            elif vampire and deck_has_vampire(self.crafted):
+                msg = "Vampire already in deck (one only)."
             elif cure and any(c.cure for c in self.crafted):
                 msg = "Cure already in deck (one only)."
             elif (
@@ -3637,6 +3979,7 @@ class CrashOutApp(tk.Tk):
                         lava,
                         joker,
                         reaper,
+                        vampire,
                         cure,
                     )
                 )
@@ -3668,7 +4011,7 @@ class CrashOutApp(tk.Tk):
                 "Craft at least one card before exporting a deck.",
             )
             return
-        decks_dir = default_decks_dir(Path(__file__).resolve().parent)
+        decks_dir = default_decks_dir(PROJECT_ROOT)
         decks_dir.mkdir(parents=True, exist_ok=True)
         path = filedialog.asksaveasfilename(
             title="Export deck",
@@ -3699,7 +4042,7 @@ class CrashOutApp(tk.Tk):
 
     def _import_deck(self) -> None:
         assert self.settings is not None
-        decks_dir = default_decks_dir(Path(__file__).resolve().parent)
+        decks_dir = default_decks_dir(PROJECT_ROOT)
         decks_dir.mkdir(parents=True, exist_ok=True)
         path = filedialog.askopenfilename(
             title="Import deck",
@@ -3758,6 +4101,92 @@ class CrashOutApp(tk.Tk):
         play_sfx(SFX_CRAFT)
         self.show_craft()
 
+    def _randomize_crafted_deck(self) -> None:
+        assert self.settings is not None
+        craftable_slots = self.settings.deck_size - 1
+        if craftable_slots < MAX_UNIQUE_CARDS_IN_DECK:
+            play_sfx(SFX_DENY)
+            messagebox.showwarning(
+                "Deck too small",
+                f"A random deck needs at least {MAX_UNIQUE_CARDS_IN_DECK + 1} cards "
+                "to include six unique cards plus Mercy.",
+            )
+            return
+        if self.crafted and not messagebox.askyesno(
+            "Randomize deck",
+            "Replace your current unfinished cards with a random six-unique deck?",
+        ):
+            return
+
+        pp = self.settings.power_points
+        special_flags = [
+            "heavy_hit",
+            "shields",
+            "poisons",
+            "exordia",
+            "cloak",
+            "lava",
+            "joker",
+            "reaper",
+            "vampire",
+            "cure",
+        ]
+        if not self.settings.vs_bot and pp > STEAL_PP_COST:
+            special_flags.append("steals")
+        chosen_specials = random.sample(special_flags, MAX_UNIQUE_CARDS_IN_DECK)
+        cards: list[Card] = []
+
+        for slot, flag in enumerate(chosen_specials, start=1):
+            damage = 0
+            if flag == "steals":
+                damage = random.randint(0, stat_budget(pp, True))
+            elif flag == "heavy_hit":
+                damage = random.randint(0, pp)
+            elif flag == "poisons":
+                damage = pp
+            elif flag == "vampire":
+                damage = random.randint(1, pp)
+            card = craft_card(
+                slot,
+                damage,
+                pp,
+                cards,
+                **{flag: True},
+                deck_size=self.settings.deck_size,
+            )
+            cards.append(card)
+
+        for slot in range(len(cards) + 1, craftable_slots + 1):
+            used_archetypes = {card_archetype(card) for card in cards}
+            buckets = list(range(11))
+            if not self.settings.allow_duplicate_archetypes:
+                buckets = [
+                    bucket
+                    for bucket in buckets
+                    if name_for_split(
+                        round(pp * bucket / 10),
+                        pp - round(pp * bucket / 10),
+                        pp,
+                    )
+                    not in used_archetypes
+                ]
+            bucket = random.choice(buckets or list(range(11)))
+            damage = round(pp * bucket / 10)
+            card = craft_card(
+                slot,
+                damage,
+                pp,
+                cards,
+                deck_size=self.settings.deck_size,
+            )
+            cards.append(card)
+
+        self.crafted = cards
+        self.craft_slot = self.settings.deck_size
+        self._craft_scale = None
+        play_sfx(SFX_CRAFT)
+        self.show_craft()
+
     def save_crafted_card(self) -> None:
         assert self.settings is not None
         damage = self.damage_var.get()
@@ -3770,6 +4199,7 @@ class CrashOutApp(tk.Tk):
         lava = self.lava_var.get()
         joker = self.joker_var.get()
         reaper = self.reaper_var.get()
+        vampire = self.vampire_var.get()
         cure = self.cure_var.get()
         try:
             card = craft_card(
@@ -3786,6 +4216,7 @@ class CrashOutApp(tk.Tk):
                 lava=lava,
                 joker=joker,
                 reaper=reaper,
+                vampire=vampire,
                 cure=cure,
                 deck_size=self.settings.deck_size,
             )
@@ -3952,7 +4383,7 @@ class CrashOutApp(tk.Tk):
                     card.exordia_charged = True
             self.append_log(
                 f"DEBUG: {player.name}'s cheats enabled — no cooldowns, "
-                "Exordia stays charged, and damage immunity active."
+                "Exodia stays charged, and damage immunity active."
             )
         else:
             self.append_log(f"DEBUG: {player.name}'s cheats disabled.")
@@ -4193,7 +4624,9 @@ class CrashOutApp(tk.Tk):
                     return
                 continue
             before_hp = self._snapshot_hp()
-            for line in tick_poisons_on_turn_start(self.players[self.active]):
+            for line in tick_poisons_on_turn_start(
+                self.players[self.active], self.players
+            ):
                 self.append_log("  " + line)
             self._record_new_deaths(before_hp, "Poison")
             if not self.players[self.active].alive:

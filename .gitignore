@@ -8,3 +8,6 @@ venv/
 *.log
 .DS_Store
 Thumbs.db
+/user_prefs.json
+/decks/
+/crash_out.py

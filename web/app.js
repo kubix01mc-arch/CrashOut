@@ -9,16 +9,35 @@
   let uniquePick = null;
   let deckSize = 10;
   let theme = null;
+  const query = new URLSearchParams(location.search);
+  const queryJoinCode = query.get("join") || "";
+  const requestedJoinCode = /^[0-9]{6}$/.test(queryJoinCode) ? queryJoinCode : "";
+  const requestedPlayerName = query.get("name");
 
   const UNIQUE_META = {
-    steal: { label: "Steal", palette: "steal" },
-    heavy: { label: "Heavy Hit", palette: "heavy_hit" },
-    shield: { label: "Shield", palette: "selected" },
-    poison: { label: "Poison", palette: "poison" },
+    steal: { label: "Steal", palette: "steal", flag: "steals", can: "steal" },
+    heavy: { label: "Heavy Hit", palette: "heavy_hit", flag: "heavy_hit", can: "heavy" },
+    shield: { label: "Shield", palette: "selected", flag: "shields", can: "shield" },
+    poison: { label: "Poison", palette: "poison", flag: "poisons", can: "poison" },
+    exordia: { label: "Exodia", palette: "selected", flag: "exordia", can: "exordia", zeroBudget: true },
+    cloak: { label: "Cloak", palette: "selected", flag: "cloak", can: "cloak", zeroBudget: true },
+    lava: { label: "Floor is Lava", palette: "selected", flag: "lava", can: "lava", zeroBudget: true },
+    joker: { label: "Joker", palette: "selected", flag: "joker", can: "joker", zeroBudget: true },
+    reaper: { label: "Reaper", palette: "selected", flag: "reaper", can: "reaper", zeroBudget: true },
+    vampire: { label: "Vampire", palette: "poison", flag: "vampire", can: "vampire" },
+    cure: { label: "Cure", palette: "selected", flag: "cure", can: "cure", zeroBudget: true },
   };
 
   const $ = (id) => document.getElementById(id);
   const screens = ["home", "lobby", "craft", "play", "over"];
+
+  const matchSize = $("match-size");
+  for (let count = 5; count <= 100; count += 1) {
+    const option = document.createElement("option");
+    option.value = String(count);
+    option.textContent = `${count} players`;
+    matchSize.appendChild(option);
+  }
 
   function show(name) {
     screens.forEach((s) => {
@@ -50,7 +69,14 @@
     const charW = Math.max(8, Math.round(9.5 * factor));
     let width = Math.max(Math.round(152 * factor), hpText.length * charW + 28);
     let height = Math.max(Math.round(72 * factor), Math.round(64 * factor));
-    if (player.alive && (player.shield || player.poisoned)) {
+    if (
+      player.alive &&
+      (player.shield ||
+        player.poisoned ||
+        player.reaper_marked ||
+        player.vampire_marked ||
+        player.cloak_charges > 0)
+    ) {
       height = Math.max(height, Math.round(80 * factor));
     }
     return [width - (width % 2), height - (height % 2)];
@@ -119,23 +145,18 @@
   function paintUniquePicks() {
     if (!theme || !window.PixelArt) return;
     const craft = state?.craft;
-    const can = {
-      steal: craft ? !!craft.can_steal : true,
-      heavy: craft ? !!craft.can_heavy : true,
-      shield: craft ? !!craft.can_shield : true,
-      poison: craft ? !!craft.can_poison : true,
-    };
     Object.keys(UNIQUE_META).forEach((key) => {
+      const meta = UNIQUE_META[key];
       const canvas = $(`pick-${key}`);
       if (!canvas) return;
-      const locked = craft ? !can[key] : false;
+      const locked = craft ? !craft[`can_${meta.can}`] : false;
       canvas.classList.toggle("disabled", locked);
       canvas.classList.toggle("on", uniquePick === key);
       PixelArt.drawUniquePick(
         canvas,
         theme,
-        UNIQUE_META[key].palette,
-        UNIQUE_META[key].label,
+        meta.palette,
+        meta.label,
         uniquePick === key,
         locked,
         canvas.matches(":hover")
@@ -184,6 +205,7 @@
     const lines = [
       `Max HP = 2× starting. Last card (${n}) = Mercy (25 heal any target).`,
       `Deck size 3–20.`,
+      "Special cards: Steal, Heavy Hit, Shield, Poison, Exodia, Cloak, Floor is Lava, Joker, Reaper, Vampire, and Cure.",
     ];
     if (n >= 12) {
       lines.push("12+ cards: duplicate types allowed (uniques still one each).");
@@ -208,6 +230,13 @@
     ws = new WebSocket(wsUrl);
     ws.onopen = () => {
       $("connection").textContent = "Ready";
+      if (requestedJoinCode) {
+        send({
+          action: "join",
+          name: requestedPlayerName || "Player",
+          code: requestedJoinCode,
+        });
+      }
     };
     ws.onclose = () => {
       $("connection").textContent = "Disconnected — refresh to retry";
@@ -237,21 +266,65 @@
     const el = document.createElement("button");
     el.type = "button";
     el.className = "card-face";
+    el.setAttribute("aria-label", `${c.name || "Card"}. ${c.effect || "No description available."}`);
     const canvas = document.createElement("canvas");
     canvas.width = 120;
     canvas.height = 168;
     el.appendChild(canvas);
-    if (theme && window.PixelArt) {
-      PixelArt.drawCardFace(canvas, theme, c, {});
-      el.onmouseenter = () => PixelArt.drawCardFace(canvas, theme, c, { hover: true });
-      el.onmouseleave = () => PixelArt.drawCardFace(canvas, theme, c, {});
-    }
+    if (theme && window.PixelArt) PixelArt.drawCardFace(canvas, theme, c, {});
+    el.onmouseenter = (event) => {
+      if (theme && window.PixelArt) {
+        PixelArt.drawCardFace(canvas, theme, c, { hover: true });
+      }
+      showCardTooltip(c, event.clientX, event.clientY);
+    };
+    el.onmousemove = (event) => positionCardTooltip(event.clientX, event.clientY);
+    el.onmouseleave = () => {
+      if (theme && window.PixelArt) PixelArt.drawCardFace(canvas, theme, c, {});
+      hideCardTooltip();
+    };
+    el.onfocus = () => {
+      const rect = el.getBoundingClientRect();
+      showCardTooltip(c, rect.right, rect.top + rect.height / 2);
+    };
+    el.onblur = hideCardTooltip;
     if (playable && !c.cooling) {
       el.onclick = () => send({ action: "play_card", card_id: c.id });
     } else {
       el.disabled = true;
     }
     return el;
+  }
+
+  function showCardTooltip(card, x, y) {
+    $("card-tooltip-title").textContent = card.name || "Card";
+    $("card-tooltip-description").textContent =
+      card.effect || "No description available.";
+    $("card-tooltip").classList.remove("hidden");
+    $("card-tooltip").setAttribute("aria-hidden", "false");
+    positionCardTooltip(x, y);
+  }
+
+  function positionCardTooltip(x, y) {
+    const tooltip = $("card-tooltip");
+    if (tooltip.classList.contains("hidden")) return;
+    const gap = 14;
+    const rect = tooltip.getBoundingClientRect();
+    const left =
+      x + gap + rect.width <= window.innerWidth
+        ? x + gap
+        : Math.max(gap, x - rect.width - gap);
+    const top =
+      y + gap + rect.height <= window.innerHeight
+        ? y + gap
+        : Math.max(gap, y - rect.height - gap);
+    tooltip.style.left = `${left}px`;
+    tooltip.style.top = `${top}px`;
+  }
+
+  function hideCardTooltip() {
+    $("card-tooltip").classList.add("hidden");
+    $("card-tooltip").setAttribute("aria-hidden", "true");
   }
 
   function escapeHtml(s) {
@@ -265,6 +338,7 @@
   function craftBudget() {
     if (!state?.craft) return state?.settings?.power_points || 100;
     const pp = state.settings.power_points;
+    if (UNIQUE_META[uniquePick]?.zeroBudget) return 0;
     if (uniquePick === "steal") return state.craft.budget_steal;
     if (uniquePick === "shield") return state.craft.budget_shield;
     return pp;
@@ -287,6 +361,10 @@
       dmg = budget;
       slider.value = String(budget);
       slider.disabled = true;
+    } else if (budget === 0) {
+      dmg = 0;
+      slider.value = "0";
+      slider.disabled = true;
     } else {
       slider.disabled = false;
     }
@@ -295,14 +373,10 @@
   }
 
   function syncUniquePicks(craft) {
-    const can = {
-      steal: !!craft.can_steal,
-      heavy: !!craft.can_heavy,
-      shield: !!craft.can_shield,
-      poison: !!craft.can_poison,
-    };
     Object.keys(UNIQUE_META).forEach((key) => {
-      if (!can[key] && uniquePick === key) uniquePick = null;
+      if (!craft[`can_${UNIQUE_META[key].can}`] && uniquePick === key) {
+        uniquePick = null;
+      }
     });
     paintUniquePicks();
   }
@@ -402,6 +476,15 @@
         canvas.className = "hud-chip";
         canvas.width = w;
         canvas.height = h;
+        canvas.title = [
+          p.shield ? "Shield" : "",
+          p.poisoned ? "Poisoned" : "",
+          p.reaper_marked ? "Reaper-marked" : "",
+          p.vampire_marked ? "Vampire-marked" : "",
+          p.cloak_charges > 0 ? `Cloak (${p.cloak_charges} delayed uses)` : "",
+        ]
+          .filter(Boolean)
+          .join(" · ");
         if (theme && window.PixelArt) PixelArt.drawHudChip(canvas, theme, p);
         hud.appendChild(canvas);
       });
@@ -425,8 +508,11 @@
         targets.classList.remove("hidden");
         cancel.classList.remove("hidden");
         targets.innerHTML = "";
+        const allowedTargets = new Set(
+          state.pending_targets || state.players.map((p) => p.seat)
+        );
         state.players.forEach((p) => {
-          if (!p.alive) return;
+          if (!p.alive || !allowedTargets.has(p.seat)) return;
           const b = document.createElement("button");
           b.type = "button";
           b.className = "target art-btn";
@@ -471,26 +557,39 @@
 
   $("btn-host").onclick = () => send(hostPayload());
   $("btn-join").onclick = () => {
+    const code = ($("room-code").value || "").trim();
+    if (!/^[0-9]{6}$/.test(code)) {
+      toast("Enter the six-digit room code");
+      return;
+    }
     send({
       action: "join",
       name: $("name").value || "Player",
-      code: ($("room-code").value || "").trim().toUpperCase(),
+      code,
     });
   };
   $("btn-start-craft").onclick = () => {
     send({ action: "start_craft", host_token: hostToken });
   };
 
-  ["steal", "heavy", "shield", "poison"].forEach((key) => {
+  Object.keys(UNIQUE_META).forEach((key) => {
     const canvas = $(`pick-${key}`);
-    canvas.onclick = () => {
+    const toggle = () => {
       if (canvas.classList.contains("disabled")) return;
       uniquePick = uniquePick === key ? null : key;
       if (uniquePick === "shield") $("dmg-slider").value = "0";
       if (uniquePick === "poison") $("dmg-slider").value = $("dmg-slider").max;
+      if (UNIQUE_META[uniquePick]?.zeroBudget) $("dmg-slider").value = "0";
       if (state?.craft) syncUniquePicks(state.craft);
       else paintUniquePicks();
       updateSplitPreview();
+    };
+    canvas.onclick = toggle;
+    canvas.onkeydown = (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggle();
+      }
     };
     canvas.onmouseenter = () => paintUniquePicks();
     canvas.onmouseleave = () => paintUniquePicks();
@@ -498,13 +597,14 @@
 
   $("dmg-slider").oninput = updateSplitPreview;
   $("btn-craft").onclick = () => {
+    const flags = {};
+    Object.entries(UNIQUE_META).forEach(([key, meta]) => {
+      flags[meta.flag] = uniquePick === key;
+    });
     send({
       action: "craft",
       damage: Number($("dmg-slider").value),
-      steals: uniquePick === "steal",
-      heavy_hit: uniquePick === "heavy",
-      shields: uniquePick === "shield",
-      poisons: uniquePick === "poison",
+      ...flags,
     });
     uniquePick = null;
   };
@@ -527,8 +627,7 @@
   fetch("/api/host-info")
     .then((r) => r.json())
     .then((info) => {
-      $("host-hint").textContent =
-        `Friends open http://${info.lan_ip}:8765 and enter your room code.`;
+      $("host-hint").textContent = info.hint;
     })
     .catch(() => {});
 

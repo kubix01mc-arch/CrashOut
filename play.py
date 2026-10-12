@@ -1,64 +1,29 @@
 #!/usr/bin/env python3
-"""Crash Out launcher — choose terminal, window, or browser (WiFi) play."""
+"""Launch the Crash Out desktop window or browser game."""
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
-
-def pick_mode() -> str:
-    print()
-    print("=" * 52)
-    print("  CRASH OUT — Launch")
-    print("=" * 52)
-    print()
-    print("How do you want to play?")
-    print("  1) Window (graphical)")
-    print("  2) Terminal")
-    print("  3) Browser / WiFi multiplayer")
-    print()
-    while True:
-        raw = input("Choice (1-3) [1]: ").strip() or "1"
-        if raw in ("1", "2", "3"):
-            return raw
-        print("  Enter 1, 2, or 3.")
+PROJECTS_DIR = Path(__file__).resolve().parent.parent
+if str(PROJECTS_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECTS_DIR))
 
 
 def main() -> None:
-    # Optional CLI: python play.py window | terminal | browser
-    if len(sys.argv) > 1:
-        arg = sys.argv[1].strip().lower()
-        if arg in ("window", "gui", "1", "-w"):
-            from crash_out_window import main as window_main
-
-            window_main()
-            return
-        if arg in ("terminal", "cli", "2", "-t"):
-            from crash_out import main as terminal_main
-
-            terminal_main()
-            return
-        if arg in ("browser", "web", "wifi", "3", "-b"):
-            from crash_out_browser import main as browser_main
-
-            browser_main()
-            return
-        print(f"Unknown mode '{sys.argv[1]}'. Use: window | terminal | browser")
-        sys.exit(1)
-
-    choice = pick_mode()
-    if choice == "1":
+    mode = sys.argv[1].strip().lower() if len(sys.argv) > 1 else "window"
+    if mode in ("window", "gui", "-w"):
         from crash_out_window import main as window_main
 
         window_main()
-    elif choice == "2":
-        from crash_out import main as terminal_main
-
-        terminal_main()
-    else:
+    elif mode in ("browser", "web", "wifi", "-b"):
         from crash_out_browser import main as browser_main
 
         browser_main()
+    else:
+        print(f"Unknown mode '{mode}'. Use: window | browser")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

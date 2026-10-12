@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 STARTING_HP = 100
 PLAYER_COUNT_MIN = 2
-PLAYER_COUNT_MAX = 10
+PLAYER_COUNT_MAX = 100
 
 # Creative Mode: every card deals 999 damage, no cooldowns.
 STANDARD_DECK = [
@@ -128,17 +128,7 @@ def choose_player_count() -> int:
     print("How many players for this match?\n")
     return prompt_choice(
         "Pick a match size:",
-        [
-            "2 players",
-            "3 players",
-            "4 players",
-            "5 players",
-            "6 players",
-            "7 players",
-            "8 players",
-            "9 players",
-            "10 players",
-        ],
+        [f"{count} players" for count in range(2, PLAYER_COUNT_MAX + 1)],
     ) + PLAYER_COUNT_MIN
 
 

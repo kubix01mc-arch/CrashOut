@@ -521,6 +521,15 @@
   function cardPalette(theme, card) {
     const art = theme.cards;
     if (card.cooling) return art.disabled;
+    if (
+      card.exordia ||
+      card.cloak ||
+      card.lava ||
+      card.joker ||
+      card.reaper ||
+      card.cure
+    ) return art.selected;
+    if (card.vampire) return art.poison;
     if (card.heal_any || (card.heal > card.damage && !card.steals && !card.heavy_hit && !card.shields && !card.poisons))
       return art.heal;
     if (card.heavy_hit) return art.heavy_hit;
@@ -532,10 +541,27 @@
 
   function faceStats(card) {
     if (card.heal_any) return [`HEAL\n${card.heal}`, "any target"];
+    if (card.exordia) return ["EXODIA", card.exordia_charged ? "charged / one-shot" : `${card.exordia_uses || 0}/4 charges`];
+    if (card.cloak) return ["CLOAK", "3-turn delay"];
+    if (card.lava) return ["LAVA", "mark half / 25% HP"];
+    if (card.joker) return ["JOKER", "random 1-use copy"];
+    if (card.reaper) return ["REAPER", "15 turns above HP"];
+    if (card.cure) return ["CURE", "clear poison / marks"];
     const dmg = card.display_damage ?? card.damage;
     const heal = card.display_heal ?? card.heal;
-    if (heal <= dmg) return [`${dmg}\nDMG`, heal > 0 ? `+${heal} heal you` : ""];
-    return [`${heal}\nHEAL`, dmg > 0 ? `+${dmg} dmg to target` : ""];
+    let detail = "";
+    let stats;
+    if (heal <= dmg) {
+      stats = `${dmg}\nDMG`;
+      detail = heal > 0 ? `+${heal} heal you` : "";
+    } else {
+      stats = `${heal}\nHEAL`;
+      detail = dmg > 0 ? `+${dmg} dmg to target` : "";
+    }
+    if (card.vampire) {
+      detail = `${detail}${detail ? " / " : ""}vampire mark 5t`;
+    }
+    return [stats, detail];
   }
 
   function drawCardFace(canvas, theme, card, opts) {
@@ -586,6 +612,18 @@
     wrapText(ctx, detail, x2 - x1 - 8 * scale).forEach((ln, i) => {
       ctx.fillText(ln, cx, y2 - 6 * scale + i * 10);
     });
+    if (card.lava_marked) {
+      const badgeX = x1 + 3 * scale;
+      const badgeY = y1 + 3 * scale;
+      const badgeSize = 11 * scale;
+      rect(ctx, badgeX, badgeY, badgeX + badgeSize, badgeY + badgeSize, "#ff8a1a");
+      frame(ctx, badgeX, badgeY, badgeX + badgeSize, badgeY + badgeSize, "#ffd1a6", Math.max(1, scale / 2));
+      ctx.fillStyle = "#fff8ee";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.font = `bold ${mcFontSize(Math.max(7, Math.floor(Math.min(w, h) * 0.055)))}px ${family}`;
+      ctx.fillText("LAVA", badgeX + badgeSize / 2, badgeY + badgeSize / 2);
+    }
   }
 
   function drawHudChip(canvas, theme, player) {
@@ -617,6 +655,15 @@
     } else if (player.alive && player.poisoned) {
       ctx.fillStyle = theme.cards.poison[1];
       ctx.fillText("POISON", cx, Math.floor(h * 0.88));
+    } else if (player.alive && player.reaper_marked) {
+      ctx.fillStyle = theme.cards.heavy_hit[1];
+      ctx.fillText("REAPER", cx, Math.floor(h * 0.88));
+    } else if (player.alive && player.vampire_marked) {
+      ctx.fillStyle = theme.cards.poison[1];
+      ctx.fillText("VAMPIRE", cx, Math.floor(h * 0.88));
+    } else if (player.alive && player.cloak_charges > 0) {
+      ctx.fillStyle = accent;
+      ctx.fillText(`CLOAK ${player.cloak_charges}`, cx, Math.floor(h * 0.88));
     }
   }
 

@@ -178,6 +178,10 @@ input.code {
   height: 168px;
   cursor: pointer;
 }
+.unique-card:focus-visible {
+  outline: 3px solid var(--title);
+  outline-offset: 3px;
+}
 .unique-card.disabled { cursor: not-allowed; }
 .slider-label { display: block; margin: 8px 0; font-size: 12px; font-family: var(--font); }
 .preview { color: var(--title); text-align: center; font-size: 12px; }
@@ -203,6 +207,30 @@ input.code {
   padding: 0;
 }
 .card-face:disabled { cursor: default; }
+.card-tooltip {
+  position: fixed;
+  z-index: 30;
+  width: min(340px, calc(100vw - 28px));
+  padding: 12px 14px;
+  border: 3px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1.6;
+  pointer-events: none;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  box-shadow: 4px 4px 0 color-mix(in srgb, var(--log-bg) 75%, transparent);
+}
+.card-tooltip strong,
+.card-tooltip span {
+  display: block;
+}
+.card-tooltip strong {
+  color: var(--title);
+  margin-bottom: 6px;
+}
 .hud {
   display: flex;
   flex-wrap: wrap;

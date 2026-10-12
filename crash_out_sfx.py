@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import math
+import subprocess
 import struct
+import sys
+import tempfile
 import threading
 import wave
 from io import BytesIO
@@ -146,6 +149,15 @@ def _custom_sfx_path(name: str) -> Path | None:
 
 
 def _play_wav_file(path: Path) -> None:
+    if sys.platform == "darwin":
+        with _play_lock:
+            subprocess.run(
+                ["/usr/bin/afplay", str(path)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        return
     try:
         import winsound
     except ImportError:
@@ -158,6 +170,15 @@ def _play_wav_file(path: Path) -> None:
 
 
 def _play_wav_bytes(data: bytes) -> None:
+    if sys.platform == "darwin":
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as sound_file:
+            sound_file.write(data)
+            path = Path(sound_file.name)
+        try:
+            _play_wav_file(path)
+        finally:
+            path.unlink(missing_ok=True)
+        return
     # Windows winsound cannot combine SND_MEMORY with SND_ASYNC.
     # Play synchronously inside our worker thread so the UI stays responsive.
     try:

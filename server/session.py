@@ -18,6 +18,7 @@ from CrashOut_Resources import (
     FIFTH_CARD_HEAL,
     HP_MAX,
     HP_MIN,
+    MAX_UNIQUE_CARDS_IN_DECK,
     PLAYER_COUNT_MAX,
     PP_MAX,
     PP_MIN,
@@ -31,6 +32,7 @@ from CrashOut_Resources import (
     can_add_poison_card,
     can_add_shield_card,
     can_add_steal_card,
+    can_add_vampire_card,
     card_is_cooling,
     card_to_dict,
     check_winner,
@@ -47,13 +49,14 @@ from CrashOut_Resources import (
     return_expired_borrows,
     stat_budget,
     tick_poisons_on_turn_start,
+    tick_reaper_marks,
     tick_turn_cooldowns,
+    unique_card_total,
 )
 
 
-def _room_code(n: int = 4) -> str:
-    alphabet = string.ascii_uppercase + string.digits
-    return "".join(secrets.choice(alphabet) for _ in range(n))
+def _room_code(n: int = 6) -> str:
+    return "".join(secrets.choice(string.digits) for _ in range(n))
 
 
 def _token() -> str:
@@ -66,6 +69,7 @@ def _public_card(card: Card, *, cooling: bool = False) -> dict[str, Any]:
     data["cooldown_remaining"] = int(card.cooldown_remaining)
     data["cooling"] = cooling
     data["borrowed"] = bool(card.is_borrowed)
+    data["effect"] = card.effect
     dmg = int(card.damage)
     heal = int(card.heal)
     if card.heavy_hit:
@@ -195,6 +199,13 @@ class MatchSession:
         heavy_hit: bool = False,
         shields: bool = False,
         poisons: bool = False,
+        exordia: bool = False,
+        cloak: bool = False,
+        lava: bool = False,
+        joker: bool = False,
+        reaper: bool = False,
+        vampire: bool = False,
+        cure: bool = False,
     ) -> Card:
         if self.phase != "craft":
             raise RuntimeError("Not in craft phase.")
@@ -217,6 +228,13 @@ class MatchSession:
             heavy_hit=heavy_hit,
             shields=shields,
             poisons=poisons,
+            exordia=exordia,
+            cloak=cloak,
+            lava=lava,
+            joker=joker,
+            reaper=reaper,
+            vampire=vampire,
+            cure=cure,
             deck_size=self.settings.deck_size,
         )
         seat.deck.append(card)
@@ -270,11 +288,43 @@ class MatchSession:
         self._turn_start_ticks()
 
     def _turn_start_ticks(self) -> None:
-        if not self.players:
+        while self.players and self.phase == "play":
+            for line in tick_reaper_marks(self.players):
+                self.log.append(line)
+            winner = check_winner(self.players)
+            if winner is not None:
+                self.phase = "game_over"
+                self.winner_name = winner.name
+                self.log.append(f"{winner.name} wins!")
+                return
+
+            player = self.players[self.active]
+            if not player.alive:
+                nxt = next_alive_index(self.players, self.active)
+                if nxt is None:
+                    self.phase = "game_over"
+                    self.log.append("No living players left.")
+                    return
+                self.active = nxt
+                continue
+
+            for line in tick_poisons_on_turn_start(player, self.players):
+                self.log.append(line)
+            winner = check_winner(self.players)
+            if winner is not None:
+                self.phase = "game_over"
+                self.winner_name = winner.name
+                self.log.append(f"{winner.name} wins!")
+                return
+            if not player.alive:
+                nxt = next_alive_index(self.players, self.active)
+                if nxt is None:
+                    self.phase = "game_over"
+                    self.log.append("No living players left.")
+                    return
+                self.active = nxt
+                continue
             return
-        player = self.players[self.active]
-        for line in tick_poisons_on_turn_start(player):
-            self.log.append(line)
 
     def play_card(self, token: str, card_id: int) -> None:
         if self.phase != "play":
@@ -291,6 +341,30 @@ class MatchSession:
         if card_is_cooling(player, card):
             raise RuntimeError("That card is cooling down.")
         self.pending_card_id = card_id
+
+    def _valid_target_indices(self, card: Card) -> list[int]:
+        if card.heal_any:
+            return [i for i, player in enumerate(self.players) if player.alive]
+        if card.exordia and not card.exordia_charged:
+            return [self.active]
+        if not (
+            card.damage > 0
+            or card.steals
+            or card.heavy_hit
+            or card.poisons
+            or card.exordia
+            or card.lava
+            or card.joker
+            or card.reaper
+            or card.vampire
+        ):
+            return [self.active]
+        opponents = [
+            i
+            for i, player in enumerate(self.players)
+            if i != self.active and player.alive
+        ]
+        return opponents or [self.active]
 
     def choose_target(self, token: str, target_idx: int) -> None:
         if self.phase != "play":
@@ -312,6 +386,8 @@ class MatchSession:
         if card is None:
             self.pending_card_id = None
             raise ValueError("Card no longer in hand.")
+        if target_idx not in self._valid_target_indices(card):
+            raise ValueError("That card cannot target this player.")
         self.pending_card_id = None
         self._execute_play(card, target_idx)
 
@@ -353,11 +429,6 @@ class MatchSession:
         self.pending_card_id = None
         self.log.append(f"Turn — {self.players[self.active].name}")
         self._turn_start_ticks()
-        winner = check_winner(self.players)
-        if winner is not None:
-            self.phase = "game_over"
-            self.winner_name = winner.name
-            self.log.append(f"{winner.name} wins!")
 
     def bot_should_act(self) -> bool:
         return (
@@ -470,6 +541,9 @@ class MatchSession:
                         "alive": p.alive,
                         "shield": p.shield_charges > 0,
                         "poisoned": p.poisoned,
+                        "reaper_marked": bool(p.reaper_marks),
+                        "vampire_marked": bool(p.vampire_marks),
+                        "cloak_charges": p.cloak_charges,
                         "hand_count": len(p.hand),
                         "is_active": i == self.active,
                         "is_bot": p.is_bot,
@@ -480,11 +554,25 @@ class MatchSession:
                 payload["your_hand"] = [
                     _public_card(c, cooling=card_is_cooling(me, c)) for c in me.hand
                 ]
+                if (
+                    self.pending_card_id is not None
+                    and seat.seat == self.active
+                ):
+                    pending = next(
+                        (c for c in me.hand if c.id == self.pending_card_id), None
+                    )
+                    payload["pending_targets"] = (
+                        self._valid_target_indices(pending) if pending is not None else []
+                    )
 
         if self.phase == "craft" and seat is not None:
             need = settings.deck_size - 1
             crafted = len(seat.deck)
             pp = settings.power_points
+            can_add_unique = (
+                settings.deck_size != DECK_SIZE
+                or unique_card_total(seat.deck) < MAX_UNIQUE_CARDS_IN_DECK
+            )
             payload["your_deck"] = [_public_card(c) for c in seat.deck]
             payload["craft"] = {
                 "slot": min(crafted + 1, settings.deck_size),
@@ -493,10 +581,24 @@ class MatchSession:
                 "ready": seat.ready,
                 "done_craftable": crafted >= need,
                 "budget_full": pp,
-                "can_steal": (not self.vs_bot) and can_add_steal_card(seat.deck, pp),
-                "can_heavy": can_add_heavy_hit_card(seat.deck),
-                "can_shield": can_add_shield_card(seat.deck, pp),
-                "can_poison": can_add_poison_card(seat.deck),
+                "can_steal": (
+                    can_add_unique
+                    and (not self.vs_bot)
+                    and can_add_steal_card(seat.deck, pp)
+                ),
+                "can_heavy": can_add_unique and can_add_heavy_hit_card(seat.deck),
+                "can_shield": (
+                    can_add_unique and can_add_shield_card(seat.deck, pp)
+                ),
+                "can_poison": can_add_unique and can_add_poison_card(seat.deck),
+                "can_exordia": can_add_unique
+                and not any(c.exordia for c in seat.deck),
+                "can_cloak": can_add_unique and not any(c.cloak for c in seat.deck),
+                "can_lava": can_add_unique and not any(c.lava for c in seat.deck),
+                "can_joker": can_add_unique and not any(c.joker for c in seat.deck),
+                "can_reaper": can_add_unique and not any(c.reaper for c in seat.deck),
+                "can_vampire": can_add_unique and can_add_vampire_card(seat.deck),
+                "can_cure": can_add_unique and not any(c.cure for c in seat.deck),
                 "budget_steal": stat_budget(pp, True),
                 "budget_shield": stat_budget(pp, shields=True),
             }

@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import random
 import struct
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -62,7 +64,16 @@ HWND_BROADCAST = 0xFFFF
 WM_FONTCHANGE = 0x001D
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-PREFS_PATH = PROJECT_ROOT / "user_prefs.json"
+if sys.platform == "win32":
+    CONFIG_DIR = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+    CONFIG_DIR /= "Crash Out"
+elif sys.platform == "darwin":
+    CONFIG_DIR = Path.home() / "Library" / "Application Support" / "Crash Out"
+else:
+    CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    CONFIG_DIR /= "crash-out"
+PREFS_PATH = CONFIG_DIR / "user_prefs.json"
+LEGACY_PREFS_PATH = PROJECT_ROOT / "user_prefs.json"
 DEFAULT_FONT_PATH = (
     PROJECT_ROOT / "Minecraft-20230518T220806Z-001 (1)" / "Minecraft" / "arial.ttf"
 )
@@ -1158,6 +1169,7 @@ def save_theme_preference(theme: GameTheme | None = None) -> None:
         "theme": theme_to_dict(theme),
     }
     try:
+        PREFS_PATH.parent.mkdir(parents=True, exist_ok=True)
         PREFS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     except OSError:
         pass
@@ -1166,7 +1178,11 @@ def save_theme_preference(theme: GameTheme | None = None) -> None:
 def restore_theme_preference() -> GameTheme:
     """Load the last saved theme, or fall back to Default."""
     try:
-        data = json.loads(PREFS_PATH.read_text(encoding="utf-8"))
+        try:
+            raw = PREFS_PATH.read_text(encoding="utf-8")
+        except OSError:
+            raw = LEGACY_PREFS_PATH.read_text(encoding="utf-8")
+        data = json.loads(raw)
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         theme = default_theme()
         set_active_theme(theme)

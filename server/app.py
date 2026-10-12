@@ -15,6 +15,8 @@ from CrashOut_Resources import (
     DECK_SIZE,
     DEFAULT_POWER_POINTS,
     DEFAULT_STARTING_HP,
+    HP_MAX,
+    HP_MIN,
     MatchSettings,
     PLAYER_COUNT_MAX,
     clamp_deck_size,
@@ -57,7 +59,10 @@ def lan_ip() -> str:
 
 @app.get("/api/host-info")
 def host_info() -> dict[str, Any]:
-    return {"lan_ip": lan_ip(), "hint": "Others on WiFi open http://<lan_ip>:8765"}
+    return {
+        "lan_ip": lan_ip(),
+        "hint": "Players connect to this server address and join with the six-digit code.",
+    }
 
 
 def _theme_payload() -> dict[str, Any]:
@@ -157,11 +162,14 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             try:
                 if action == "create":
                     room = MatchSession()
+                    while room.code in rooms:
+                        room = MatchSession()
                     player_count = int(msg.get("player_count") or 2)
                     vs_bot = bool(msg.get("vs_bot")) or player_count == 1
                     if vs_bot:
                         player_count = 1
                     starting_hp = int(msg.get("starting_hp") or DEFAULT_STARTING_HP)
+                    starting_hp = max(HP_MIN, min(HP_MAX, starting_hp))
                     power_points = int(msg.get("power_points") or DEFAULT_POWER_POINTS)
                     deck_size = clamp_deck_size(int(msg.get("deck_size") or DECK_SIZE))
                     if player_count < 1:
@@ -246,6 +254,13 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                         heavy_hit=bool(msg.get("heavy_hit")),
                         shields=bool(msg.get("shields")),
                         poisons=bool(msg.get("poisons")),
+                        exordia=bool(msg.get("exordia")),
+                        cloak=bool(msg.get("cloak")),
+                        lava=bool(msg.get("lava")),
+                        joker=bool(msg.get("joker")),
+                        reaper=bool(msg.get("reaper")),
+                        vampire=bool(msg.get("vampire")),
+                        cure=bool(msg.get("cure")),
                     )
                 elif action == "finish_craft":
                     room.finish_craft(str(token))

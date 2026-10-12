@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared Crash Out game rules (used by terminal and window UIs)."""
+"""Shared Crash Out game rules for the desktop and browser games."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any
 DEFAULT_STARTING_HP = 500
 DEFAULT_POWER_POINTS = 100
 PLAYER_COUNT_MIN = 1
-PLAYER_COUNT_MAX = 10
+PLAYER_COUNT_MAX = 100
 DECK_SIZE = 10  # default max cards (includes Mercy as last card)
 MAX_UNIQUE_CARDS_IN_DECK = 6
 DECK_SIZE_MIN = 3
@@ -31,9 +31,10 @@ ARCHETYPE_BUCKETS = 10
 BORROW_TURNS = 2  # return after thief ends this many turns (steal turn + 1 more)
 POISON_DURATION_TURNS = 3
 POISON_DOT_FRACTION = 0.10
+VAMPIRE_DURATION_TURNS = 5
 REAPER_DURATION_TURNS = 15
 BOT_NAME = "bot"
-HP_MIN, HP_MAX = 1, 9999
+HP_MIN, HP_MAX = 1, 1000000
 PP_MIN, PP_MAX = 1, 999
 TURN_DELAY_MS = 500
 TURN_DELAY_SEC = 0.5
@@ -62,6 +63,7 @@ UNIQUE_CARD_FIELDS = (
     "lava",
     "joker",
     "reaper",
+    "vampire",
     "cure",
 )
 
@@ -71,6 +73,12 @@ class ActiveReaper:
     source_idx: int
     target_idx: int
     turns_left: int = 5
+
+
+@dataclass
+class ActiveVampireMark:
+    source_idx: int
+    turns_left: int = VAMPIRE_DURATION_TURNS
 
 
 @dataclass
@@ -89,6 +97,7 @@ class Card:
     lava: bool = False
     joker: bool = False
     reaper: bool = False
+    vampire: bool = False
     cure: bool = False
     exordia_uses: int = 0
     exordia_charged: bool = False
@@ -120,8 +129,8 @@ class Card:
             )
         if self.exordia:
             if self.exordia_charged:
-                return "Charged Exordia — one-shot the next player, then discharge."
-            return "Charge Exordia by using it 4 times; on the next charge it one-shots the next player."
+                return "Charged Exodia — one-shot the next player, then discharge."
+            return "Charge Exodia by using it 4 times; on the next charge it one-shots the next player."
         if self.cloak:
             return "Cloak — the next 3 cards you use are delayed, then all 3 fire together."
         if self.lava:
@@ -131,7 +140,9 @@ class Card:
         if self.reaper:
             return f"Reaper — if you stay above the target's HP for {REAPER_DURATION_TURNS} consecutive turns, execute them at the end of the final turn."
         if self.cure:
-            return "Cure — clears your poison, lava marks, and Reaper effects from yourself."
+            return "Cure — clears your poison, lava marks, Reaper effects, and Vampire marks from yourself."
+        if self.vampire:
+            return base + f" / Vampire mark ({VAMPIRE_DURATION_TURNS} turns; user heals half of target damage)"
         return base
 
     def label(self) -> str:
@@ -150,7 +161,7 @@ class Card:
             elif self.poisons:
                 extra_note = " + Poison"
             elif self.exordia:
-                extra_note = " + Exordia"
+                extra_note = " + Exodia"
             elif self.cloak:
                 extra_note = " + Cloak"
             elif self.lava:
@@ -159,6 +170,8 @@ class Card:
                 extra_note = " + Joker"
             elif self.reaper:
                 extra_note = " + Reaper"
+            elif self.vampire:
+                extra_note = " + Vampire"
             elif self.cure:
                 extra_note = " + Cure"
             if not extra:
@@ -181,7 +194,7 @@ class Card:
         if self.heal_any:
             return f"HEAL\n{self.heal}", "any target"
         if self.exordia:
-            return "EXORDIA", "4x charge / 1-shot"
+            return "EXODIA", "4x charge / 1-shot"
         if self.cloak:
             return "CLOAK", "3-turn delay"
         if self.lava:
@@ -191,7 +204,7 @@ class Card:
         if self.reaper:
             return "REAPER", f"{REAPER_DURATION_TURNS} turns above HP"
         if self.cure:
-            return "CURE", "clear your poison / lava / reaper"
+            return "CURE", "clear poison / lava / Reaper / Vampire"
         dmg, heal = effective_card_stats(self)
         if heal <= dmg:
             primary = f"{dmg}\nDMG"
@@ -212,6 +225,8 @@ class Card:
             tick = poison_tick_damage(dmg)
             poison_line = f"poison {tick}x{POISON_DURATION_TURNS}"
             extra = f"{extra} / {poison_line}" if extra else poison_line
+        if self.vampire:
+            extra = f"{extra} / vampire mark {VAMPIRE_DURATION_TURNS}t" if extra else f"vampire mark {VAMPIRE_DURATION_TURNS}t"
         return primary, extra
 
 
@@ -242,6 +257,7 @@ class Player:
     cloak_charges: int = 0
     cloak_queue: list[Card] = field(default_factory=list)
     reaper_marks: list[ActiveReaper] = field(default_factory=list)
+    vampire_marks: list[ActiveVampireMark] = field(default_factory=list)
     cheats_enabled: bool = False
 
     @property
@@ -304,11 +320,12 @@ def unique_card_count(cards: list[Card]) -> dict[str, int]:
         "heavy_hit": "Heavy Hit",
         "shields": "Shield",
         "poisons": "Poison",
-        "exordia": "Exordia",
+        "exordia": "Exodia",
         "cloak": "Cloak",
         "lava": "Floor is Lava",
         "joker": "Joker",
         "reaper": "Reaper",
+        "vampire": "Vampire",
         "cure": "Cure",
     }.items():
         counts[label] = sum(getattr(card, field) for card in cards)
@@ -388,7 +405,7 @@ def card_archetype(card: Card) -> str:
     if card.poisons:
         return "Poison"
     if card.exordia:
-        return "Exordia"
+        return "Exodia"
     if card.cloak:
         return "Cloak"
     if card.lava:
@@ -397,6 +414,8 @@ def card_archetype(card: Card) -> str:
         return "Joker"
     if card.reaper:
         return "Reaper"
+    if card.vampire:
+        return "Vampire"
     if card.cure:
         return "Cure"
     return name_for_split(card.damage, card.heal, card.damage + card.heal)
@@ -485,6 +504,14 @@ def can_add_poison_card(existing: list[Card]) -> bool:
     return not deck_has_poison(existing)
 
 
+def deck_has_vampire(existing: list[Card]) -> bool:
+    return any(c.vampire for c in existing)
+
+
+def can_add_vampire_card(existing: list[Card]) -> bool:
+    return not deck_has_vampire(existing)
+
+
 def poison_tick_damage(card_damage: int) -> int:
     """10% of card damage per poison tick (at least 1 if the hit had damage)."""
     if card_damage <= 0:
@@ -523,6 +550,39 @@ def tick_reaper_marks(players: list[Player]) -> list[str]:
     return logs
 
 
+def apply_vampire_mark(target: Player, source_idx: int) -> list[str]:
+    if not target.alive:
+        return []
+    for mark in target.vampire_marks:
+        if mark.source_idx == source_idx:
+            mark.turns_left = VAMPIRE_DURATION_TURNS
+            break
+    else:
+        target.vampire_marks.append(ActiveVampireMark(source_idx))
+    return [
+        f"{target.name} is Vampire-marked for {VAMPIRE_DURATION_TURNS} turns; "
+        "the card's user heals half of damage the target takes during that time."
+    ]
+
+
+def tick_vampire_marks(player: Player) -> list[str]:
+    if not player.vampire_marks:
+        return []
+    logs: list[str] = []
+    remaining: list[ActiveVampireMark] = []
+    for mark in player.vampire_marks:
+        mark.turns_left -= 1
+        if mark.turns_left > 0:
+            remaining.append(mark)
+            logs.append(
+                f"Vampire mark on {player.name}: {mark.turns_left} turn(s) remain."
+            )
+        else:
+            logs.append(f"Vampire mark on {player.name} wore off.")
+    player.vampire_marks = remaining
+    return logs
+
+
 def craft_card(
     card_id: int,
     damage: int,
@@ -538,6 +598,7 @@ def craft_card(
     lava: bool = False,
     joker: bool = False,
     reaper: bool = False,
+    vampire: bool = False,
     cure: bool = False,
     deck_size: int = DECK_SIZE,
 ) -> Card:
@@ -558,6 +619,7 @@ def craft_card(
             lava,
             joker,
             reaper,
+            vampire,
             cure,
         )
         if flag
@@ -565,7 +627,7 @@ def craft_card(
     if uniques > 1:
         raise ValueError(
             "A card can only have one special effect: Steal, Heavy Hit, Shield, Poison, "
-            "Exordia, Cloak, Floor is Lava, Joker, Reaper, or Cure."
+            "Exodia, Cloak, Floor is Lava, Joker, Reaper, Vampire, or Cure."
         )
     if steals and not can_craft_steal(power_points):
         raise ValueError(f"Steal costs {STEAL_PP_COST} PP — not enough budget.")
@@ -580,7 +642,7 @@ def craft_card(
     if poisons and deck_has_poison(existing):
         raise ValueError("Your deck already has a Poison card. Only one per deck.")
     if exordia and any(c.exordia for c in existing):
-        raise ValueError("Your deck already has an Exordia card. Only one per deck.")
+        raise ValueError("Your deck already has an Exodia card. Only one per deck.")
     if cloak and any(c.cloak for c in existing):
         raise ValueError("Your deck already has a Cloak card. Only one per deck.")
     if lava and any(c.lava for c in existing):
@@ -589,6 +651,8 @@ def craft_card(
         raise ValueError("Your deck already has a Joker card. Only one per deck.")
     if reaper and any(c.reaper for c in existing):
         raise ValueError("Your deck already has a Reaper card. Only one per deck.")
+    if vampire and deck_has_vampire(existing):
+        raise ValueError("Your deck already has a Vampire card. Only one per deck.")
     if cure and any(c.cure for c in existing):
         raise ValueError("Your deck already has a Cure card. Only one per deck.")
     if deck_size == DECK_SIZE and any(
@@ -602,6 +666,7 @@ def craft_card(
             lava,
             joker,
             reaper,
+            vampire,
             cure,
         )
     ) and unique_card_total(existing) >= MAX_UNIQUE_CARDS_IN_DECK:
@@ -629,7 +694,7 @@ def craft_card(
     elif poisons:
         base = "Poison"
     elif exordia:
-        base = "Exordia"
+        base = "Exodia"
     elif cloak:
         base = "Cloak"
     elif lava:
@@ -638,6 +703,8 @@ def craft_card(
         base = "Joker"
     elif reaper:
         base = "Reaper"
+    elif vampire:
+        base = "Vampire"
     elif cure:
         base = "Cure"
     else:
@@ -665,6 +732,7 @@ def craft_card(
         lava=lava,
         joker=joker,
         reaper=reaper,
+        vampire=vampire,
         cure=cure,
     )
 
@@ -702,6 +770,7 @@ def card_to_dict(card: Card) -> dict[str, Any]:
         "lava": bool(card.lava),
         "joker": bool(card.joker),
         "reaper": bool(card.reaper),
+        "vampire": bool(card.vampire),
         "cure": bool(card.cure),
         "exordia_uses": int(card.exordia_uses),
         "exordia_charged": bool(card.exordia_charged),
@@ -725,6 +794,7 @@ def card_from_dict(data: dict[str, Any], card_id: int) -> Card:
         lava=bool(data.get("lava", False)),
         joker=bool(data.get("joker", False)),
         reaper=bool(data.get("reaper", False)),
+        vampire=bool(data.get("vampire", False)),
         cure=bool(data.get("cure", False)),
         exordia_uses=max(0, int(data.get("exordia_uses", 0))),
         exordia_charged=bool(data.get("exordia_charged", False)),
@@ -789,7 +859,8 @@ def validate_deck_export(data: dict[str, Any]) -> tuple[list[Card], int, str]:
         if unique_flags > 1:
             raise ValueError(
                 f"Card '{card.name}' can only have one special effect: "
-                "Steal, Heavy Hit, Shield, Poison, Exordia, Cloak, Floor is Lava, or Joker."
+                "Steal, Heavy Hit, Shield, Poison, Exodia, Cloak, Floor is Lava, "
+                "Joker, Reaper, Vampire, or Cure."
             )
         if card.heal_any:
             if (
@@ -802,6 +873,7 @@ def validate_deck_export(data: dict[str, Any]) -> tuple[list[Card], int, str]:
                 or card.lava
                 or card.joker
                 or card.reaper
+                or card.vampire
                 or card.cure
             ):
                 raise ValueError(
@@ -839,11 +911,12 @@ def validate_deck_export(data: dict[str, Any]) -> tuple[list[Card], int, str]:
         "heavy_hit": "Heavy Hit",
         "shields": "Shield",
         "poisons": "Poison",
-        "exordia": "Exordia",
+        "exordia": "Exodia",
         "cloak": "Cloak",
         "lava": "Floor is Lava",
         "joker": "Joker",
         "reaper": "Reaper",
+        "vampire": "Vampire",
         "cure": "Cure",
     }
     for field, label in unique_labels.items():
@@ -922,12 +995,13 @@ def is_protected_card(card: Card) -> bool:
         or card.lava
         or card.joker
         or card.reaper
+        or card.vampire
         or card.cure
     )
 
 
 def shuffle_and_deal_hands(player_decks: list[list[Card]]) -> list[list[Card]]:
-    """Shuffle craftable cards only; Mercy and steal cards stay with their owner."""
+    """Shuffle craftable cards only; Mercy and unique-effect cards stay with their owner."""
     if not player_decks:
         return []
     protected_hands: list[list[Card]] = []
@@ -1012,6 +1086,7 @@ def apply_damage(
     target: Player,
     damage: int,
     *,
+    players: list[Player] | None = None,
     bypass_shield: bool = False,
 ) -> list[str]:
     if damage <= 0:
@@ -1030,7 +1105,30 @@ def apply_damage(
             f"{target.name}'s Shield blocks {damage} damage!"
             + (" (Shield spent.)" if target.shield_charges <= 0 else "")
         ]
+    hp_before = target.hp
     target.hp = max(0, target.hp - damage)
+    damage_taken = hp_before - target.hp
+    logs = []
+    if damage_taken > 0 and players is not None:
+        healed_sources: set[int] = set()
+        for mark in target.vampire_marks:
+            source_idx = mark.source_idx
+            if (
+                mark.turns_left <= 0
+                or source_idx in healed_sources
+                or not 0 <= source_idx < len(players)
+            ):
+                continue
+            source = players[source_idx]
+            if not source.alive:
+                continue
+            healed_sources.add(source_idx)
+            heal_amount = damage_taken // 2
+            if heal_amount > 0:
+                logs.extend(apply_heal(source, heal_amount))
+                logs.append(
+                    f"Vampire heals {source.name} for half of {damage_taken} damage."
+                )
     if target.hp == 0:
         try:
             from crash_out_sfx import SFX_CRASH_OUT, play_sfx
@@ -1038,14 +1136,14 @@ def apply_damage(
             play_sfx(SFX_CRASH_OUT)
         except Exception:
             pass
-        return [f"{target.name} takes {damage} damage and is OUT!"]
+        return logs + [f"{target.name} takes {damage} damage and is OUT!"]
     try:
         from crash_out_sfx import SFX_DAMAGE, play_sfx
 
         play_sfx(SFX_DAMAGE)
     except Exception:
         pass
-    return [
+    return logs + [
         f"{target.name} takes {damage} damage ({target.hp}/{target.max_hp} HP left)"
     ]
 
@@ -1089,7 +1187,7 @@ def resolve_card(
     if card.lava_marked:
         penalty = max(1, int(round(caster.hp * 0.25)))
         card.lava_marked = False
-        logs.extend(apply_damage(caster, penalty))
+        logs.extend(apply_damage(caster, penalty, players=players))
         logs.append(
             f"{card.name} was marked by Floor is Lava — {caster.name} takes {penalty} damage ({penalty} = 25% of current HP)."
         )
@@ -1125,16 +1223,16 @@ def resolve_card(
             card.exordia_charged = caster.cheats_enabled
             card.exordia_uses = 4 if caster.cheats_enabled else 0
             logs.append(
-                f"{caster.name}'s Exordia charges and one-shots {next_target.name}!"
+                f"{caster.name}'s Exodia charges and one-shots {next_target.name}!"
             )
             return logs
         card.exordia_uses += 1
         if card.exordia_uses >= 4:
             card.exordia_charged = True
             card.exordia_uses = 0
-            logs.append(f"{caster.name}'s Exordia is charged and ready to one-shot the next player.")
+            logs.append(f"{caster.name}'s Exodia is charged and ready to one-shot the next player.")
             return logs
-        logs.append(f"{caster.name} charges Exordia ({card.exordia_uses}/4).")
+        logs.append(f"{caster.name} charges Exodia ({card.exordia_uses}/4).")
         return logs
 
     if card.cure:
@@ -1146,7 +1244,11 @@ def resolve_card(
             if held.lava_marked:
                 held.lava_marked = False
         caster.reaper_marks.clear()
-        logs.append(f"{caster.name}'s Cure removes their poison, lava marks, and Reaper marks.")
+        caster.vampire_marks.clear()
+        logs.append(
+            f"{caster.name}'s Cure removes their poison, lava marks, "
+            "Reaper marks, and Vampire marks."
+        )
         return logs
 
     if card.reaper:
@@ -1227,9 +1329,11 @@ def resolve_card(
         return logs
 
     if damage > 0:
-        logs.extend(apply_damage(target, damage))
+        logs.extend(apply_damage(target, damage, players=players))
     else:
         logs.append(f"{card.name} has 0 damage — no damage to {target.name}.")
+    if card.vampire:
+        logs.extend(apply_vampire_mark(target, active))
     if heal > 0:
         logs.extend(apply_heal(caster, heal))
     elif damage > 0:
@@ -1281,7 +1385,10 @@ def apply_poison(
     ]
 
 
-def tick_poisons_on_turn_start(player: Player) -> list[str]:
+def tick_poisons_on_turn_start(
+    player: Player,
+    players: list[Player] | None = None,
+) -> list[str]:
     """Apply poison DoT at the start of this player's turn (bypasses Shield)."""
     if not player.poisons:
         return []
@@ -1292,7 +1399,12 @@ def tick_poisons_on_turn_start(player: Player) -> list[str]:
             continue
         logs.append(f"Poison ticks on {player.name}...")
         logs.extend(
-            apply_damage(player, effect.damage_per_tick, bypass_shield=True)
+            apply_damage(
+                player,
+                effect.damage_per_tick,
+                players=players,
+                bypass_shield=True,
+            )
         )
         effect.turns_left -= 1
         if effect.turns_left > 0 and player.alive:
@@ -1330,6 +1442,7 @@ def apply_heavy_hit_cooldown_effect(
 def tick_turn_cooldowns(players: list[Player], ending_idx: int) -> list[str]:
     logs: list[str] = []
     player = players[ending_idx]
+    logs.extend(tick_vampire_marks(player))
     if player.cooldown_clear_turns > 0:
         player.cooldown_clear_turns -= 1
         if player.cooldown_clear_turns <= 0:

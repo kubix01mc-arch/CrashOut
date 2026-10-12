@@ -19,8 +19,8 @@
     <section id="screen-home" class="screen">
       <h1>CRASH OUT</h1>
       <p class="lede">
-        Craft cards, then play vs bot or with friends on the same WiFi.
-        Multiplayer shuffles craftable cards between players (Mercy / Steal / Heavy Hit / Shield / Poison stay with their owner).
+        Craft cards, then play vs bot or with friends online using a room code.
+        Multiplayer shuffles standard craftable cards between players; Mercy and all special cards stay with their creator.
       </p>
       <p class="sub" id="connection">Connecting…</p>
 
@@ -40,7 +40,7 @@
         </div>
         <div class="form-row">
           <span class="form-label">Starting HP</span>
-          <input type="number" id="setup-hp" min="1" max="9999" value="500" />
+          <input type="number" id="setup-hp" min="1" max="1000000" value="500" />
         </div>
         <div class="form-row">
           <span class="form-label">Power points / card</span>
@@ -66,10 +66,10 @@
       </div>
 
       <div class="network panel">
-        <p class="network-title">Multiplayer (same WiFi)</p>
+        <p class="network-title">Online multiplayer</p>
         <button id="btn-host" class="art-btn wide" data-label="Host room" data-palette="selected"></button>
         <div class="join-row">
-          <input id="room-code" maxlength="8" placeholder="ROOM CODE" class="code" />
+          <input id="room-code" maxlength="6" inputmode="numeric" pattern="[0-9]{6}" placeholder="6-DIGIT CODE" class="code" />
           <button id="btn-join" class="art-btn" data-label="Join" data-palette="normal"></button>
         </div>
         <p class="hint" id="host-hint"></p>
@@ -92,10 +92,17 @@
       <p id="craft-rules" class="hint"></p>
       <div class="panel craft-layout" id="craft-form">
         <div class="unique-picks" id="unique-picks">
-          <canvas class="unique-card" data-u="steal" id="pick-steal" width="120" height="168"></canvas>
-          <canvas class="unique-card" data-u="heavy" id="pick-heavy" width="120" height="168"></canvas>
-          <canvas class="unique-card" data-u="shield" id="pick-shield" width="120" height="168"></canvas>
-          <canvas class="unique-card" data-u="poison" id="pick-poison" width="120" height="168"></canvas>
+          <canvas class="unique-card" data-u="steal" id="pick-steal" width="120" height="168" role="button" tabindex="0" aria-label="Steal"></canvas>
+          <canvas class="unique-card" data-u="heavy" id="pick-heavy" width="120" height="168" role="button" tabindex="0" aria-label="Heavy Hit"></canvas>
+          <canvas class="unique-card" data-u="shield" id="pick-shield" width="120" height="168" role="button" tabindex="0" aria-label="Shield"></canvas>
+          <canvas class="unique-card" data-u="poison" id="pick-poison" width="120" height="168" role="button" tabindex="0" aria-label="Poison"></canvas>
+          <canvas class="unique-card" data-u="exordia" id="pick-exordia" width="120" height="168" role="button" tabindex="0" aria-label="Exodia"></canvas>
+          <canvas class="unique-card" data-u="cloak" id="pick-cloak" width="120" height="168" role="button" tabindex="0" aria-label="Cloak"></canvas>
+          <canvas class="unique-card" data-u="lava" id="pick-lava" width="120" height="168" role="button" tabindex="0" aria-label="Floor is Lava"></canvas>
+          <canvas class="unique-card" data-u="joker" id="pick-joker" width="120" height="168" role="button" tabindex="0" aria-label="Joker"></canvas>
+          <canvas class="unique-card" data-u="reaper" id="pick-reaper" width="120" height="168" role="button" tabindex="0" aria-label="Reaper"></canvas>
+          <canvas class="unique-card" data-u="vampire" id="pick-vampire" width="120" height="168" role="button" tabindex="0" aria-label="Vampire"></canvas>
+          <canvas class="unique-card" data-u="cure" id="pick-cure" width="120" height="168" role="button" tabindex="0" aria-label="Cure"></canvas>
         </div>
         <label class="slider-label">Damage (rest = heal)
           <input type="range" id="dmg-slider" min="0" max="100" value="50" />
@@ -130,6 +137,10 @@
     </section>
 
     <p id="toast" class="toast hidden"></p>
+  </div>
+  <div id="card-tooltip" class="card-tooltip hidden" role="tooltip" aria-hidden="true">
+    <strong id="card-tooltip-title"></strong>
+    <span id="card-tooltip-description"></span>
   </div>
   <script src="/static/pixel.js"></script>
   <script src="/static/app.js"></script>
